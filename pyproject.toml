@@ -1,0 +1,23 @@
+[project]
+name = "f1superclip-ml"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Whitney Holt", email = "a02411667@aggies.usu.edu" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "fastf1>=3.8",
+    "numpy>=2.5.4",
+    "polars>=2.0.0",
+    "pyarrow>=26.0.0",
+    "requests>=2.34.2",
+]
+
+[project.scripts]
+f1superclip-ml = "f1superclip_ml:main"
+
+[build-system]
+requires = ["uv_build>=0.12.12,<0.13.0"]
+build-backend = "uv_build"
