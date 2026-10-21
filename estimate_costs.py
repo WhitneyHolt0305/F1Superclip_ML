@@ -16,7 +16,7 @@ import requests
 # ---------- Settings (change these) ----------
 YEAR = 2026
 SESSION_NAMES = ["Qualifying", "Race"]
-MAX_SESSIONS = 2          # start small to test; set to None to use every session
+MAX_SESSIONS = None        # start small to test; set to None to use every session
 FULL_THROTTLE = 99        # throttle % that counts as "flat out"
 SUPERCLIP_DROP = 5        # km/h drop that counts as superclipping
 MIN_STRAIGHT_M = 200      # ignore flat-out bits shorter than this
