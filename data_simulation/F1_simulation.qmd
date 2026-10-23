@@ -1,4 +1,5 @@
 
+# Simulating data code
 ```{python}
 
 import arviz as az
@@ -71,4 +72,17 @@ f1_data = pl.DataFrame({
 print(f1_data.head())
 # Check the simulated superclipping rate
 print("Superclipping rate:", f1_data["superclipping"].mean())
+```
+
+# Visual that shows distribution of straight length
+
+
+```{python}
+import matplotlib.pyplot as plt
+
+plt.hist(f1_data["straight_length"].to_numpy(), bins=30, edgecolor="black")
+plt.xlabel("Straight Length")
+plt.ylabel("Frequency")
+plt.title("Distribution of F1 Straight Lengths")
+plt.show()
 ```
