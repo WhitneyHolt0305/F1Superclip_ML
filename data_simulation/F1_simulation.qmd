@@ -1,0 +1,74 @@
+
+```{python}
+
+import arviz as az
+import bambi as bmb
+import numpy as np
+import polars as pl
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+
+# Set randomization seed
+rng = np.random.default_rng(42)
+# Specify a function to simulate data
+def sim_data(n, beta_0, beta_straight, beta_braking,
+             beta_previous_energy, beta_qualifying, beta_miami):
+    # Simulate predictors for each straight
+    straight_length = rng.normal(600, 150, size=n)
+    straight_length = np.clip(straight_length, 200, None)
+    # Number of heavy braking zones before the straight
+    heavy_braking_zones = rng.binomial(2, 0.5, size=n)
+    # Energy used on the previous straight (standardized units)
+    previous_energy = rng.normal(0, 1, size=n)
+    # Session type: 1 = qualifying, 0 = race
+    qualifying = rng.binomial(1, 0.4, size=n)
+    # Rule change: 1 = after Miami, 0 = before Miami
+    after_miami = rng.binomial(1, 0.5, size=n)
+    # Standardize continuous predictors
+    straight_z = (straight_length - 600) / 150
+    # Calculate the probability of superclipping
+    log_odds = (
+        beta_0
+        + beta_straight * straight_z
+        + beta_braking * heavy_braking_zones
+        + beta_previous_energy * previous_energy
+        + beta_qualifying * qualifying
+        + beta_miami * after_miami
+    )
+    prob_y = 1 / (1 + np.exp(-log_odds))
+    # Simulate the binary outcome
+    superclipping = rng.binomial(1, prob_y, size=n)
+    return (
+        superclipping,
+        straight_length,
+        heavy_braking_zones,
+        previous_energy,
+        qualifying,
+        after_miami
+    )
+
+# Simulate 2,000 straights
+data_arr = sim_data(
+    n=2000,
+    beta_0=-0.8,
+    beta_straight=0.3,
+    beta_braking=-0.4,
+    beta_previous_energy=0.5,
+    beta_qualifying=0.4,
+    beta_miami=0.2
+)
+
+# Store the simulated data in a DataFrame
+f1_data = pl.DataFrame({
+    "superclipping": data_arr[0],
+    "straight_length": data_arr[1],
+    "heavy_braking_zones": data_arr[2],
+    "previous_energy": data_arr[3],
+    "qualifying": data_arr[4],
+    "after_miami": data_arr[5]
+})
+# Inspect the data
+print(f1_data.head())
+# Check the simulated superclipping rate
+print("Superclipping rate:", f1_data["superclipping"].mean())
+```
