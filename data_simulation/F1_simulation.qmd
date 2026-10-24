@@ -86,3 +86,70 @@ plt.ylabel("Frequency")
 plt.title("Distribution of F1 Straight Lengths")
 plt.show()
 ```
+
+# Testing Parameter Recovery
+
+We fit logistic regression to the simulated data to check whether we can recover the known parameters used to generate it.
+
+```{python}
+import pandas as pd
+
+# Convert the simulated Polars DataFrame to pandas
+data_df = pd.DataFrame(f1_data.to_dict(as_series=False))
+
+# Match the straight-length scale used in the simulation
+data_df["straight_z"] = (data_df["straight_length"] - 600) / 150
+
+# Fit a frequentist logistic regression
+fr_fit = smf.glm(
+    formula=(
+        "superclipping ~ straight_z + heavy_braking_zones "
+        "+ previous_energy + qualifying + after_miami"
+    ),
+    data=data_df,
+    family=sm.families.Binomial()
+).fit()
+
+# Display model results and 95% confidence intervals
+print(fr_fit.summary())
+print(fr_fit.conf_int())
+```
+
+# Comparing True and Estimated Parameters
+
+```{python}
+# Known coefficients used to simulate the data
+true_parameters = pd.Series({
+    "Intercept": -0.8,
+    "straight_z": 0.3,
+    "heavy_braking_zones": -0.4,
+    "previous_energy": 0.5,
+    "qualifying": 0.4,
+    "after_miami": 0.2
+})
+
+# Extract the model's 95% confidence intervals
+ci = fr_fit.conf_int()
+
+# Compare the true values with the model estimates
+recovery_table = pd.DataFrame({
+    "True": true_parameters,
+    "Estimated": fr_fit.params,
+    "CI Lower": ci[0],
+    "CI Upper": ci[1]
+})
+
+recovery_table["Error"] = (
+    recovery_table["Estimated"] - recovery_table["True"]
+)
+
+recovery_table["True in 95% CI"] = (
+    (recovery_table["True"] >= recovery_table["CI Lower"])
+    & (recovery_table["True"] <= recovery_table["CI Upper"])
+)
+
+print(recovery_table.round(3).to_string())
+print("\nModel converged:", fr_fit.converged)
+```
+
+The logistic regression model converged using 2,000 simulated observations. Most estimated coefficients were close to their known values, and all true parameters fell within their respective 95% confidence intervals. The after-Miami coefficient showed the largest difference, with an estimate of 0.055 compared with the true value of 0.2, indicating greater uncertainty for this effect. Overall, the results support that our code can recover the parameters under the assumed simulation model.
