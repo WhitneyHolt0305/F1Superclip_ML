@@ -435,6 +435,7 @@ dependencies = [
     { name = "numpy" },
     { name = "polars" },
     { name = "pyarrow" },
+    { name = "pyprojroot" },
     { name = "requests" },
     { name = "statsmodels" },
 ]
@@ -447,6 +448,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.5.4" },
     { name = "polars", specifier = ">=2.0.0" },
     { name = "pyarrow", specifier = ">=26.0.0" },
+    { name = "pyprojroot", specifier = ">=0.3.0" },
     { name = "requests", specifier = ">=2.34.2" },
     { name = "statsmodels", specifier = ">=0.15.0" },
 ]
@@ -1191,6 +1193,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e4/11/b213bebff182584360cb8d17c72c1677fec5c5c228de439e63bcf8ab1c8f/pyparsing-3.3.3.tar.gz", hash = "sha256:928ae7e20211f3b6f3915a72f06a0cfd29ab9d24279dd6346b6b1a7146397d36", size = 1050487, upload-time = "2026-09-20T20:59:05.609Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/38/bb/d215ee7c73b61497b28a5503f9f53523f294fcc936762b7caf90e0c1c2b5/pyparsing-3.3.3-py3-none-any.whl", hash = "sha256:ece8c00a69cf01b45d0b1dedabb469c90d8caf996d4fda40f147627a122849a4", size = 126420, upload-time = "2026-09-20T20:59:04.025Z" },
+]
+
+[[package]]
+name = "pyprojroot"
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ec/7f/d04044efe4acc4185db1174209fadac33cc21c015ed0d6bef8884c9fa808/pyprojroot-0.3.0.tar.gz", hash = "sha256:109705bb790968704958efcfc5ccce85d8e3dafa054897cc81371fcbbf56cb10", size = 6287, upload-time = "2023-03-13T05:39:30.318Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/53/9b/eef01392be945c0fe86a8d084ba9188b1e2b22af037d7109b9f40a962cd0/pyprojroot-0.3.0-py3-none-any.whl", hash = "sha256:c426b51b17ab4f4d4f95b479cf5b6c22df59bb58fbd4f01b37a6977d29b99888", size = 7558, upload-time = "2023-03-13T05:39:28.707Z" },
 ]
 
 [[package]]

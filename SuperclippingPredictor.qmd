@@ -1,0 +1,8 @@
+---
+title: "Formula 1 Superclipping Predictor"
+format: typst
+author: "Whitney Holt, Jake Hough, Jackson Ferry"
+---
+
+
+
