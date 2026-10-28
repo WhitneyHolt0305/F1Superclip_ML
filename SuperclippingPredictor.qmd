@@ -4,5 +4,37 @@ format: typst
 author: "Whitney Holt, Jake Hough, Jackson Ferry"
 ---
 
+## Imports
+```{python}
+import fastf1
+import polars as pl
+from pyprojroot import here
+```
 
+## Save Downloads
+```{python}
+## Cache - saves downloads so we don't have to redownload every time
+cache_dir = here('data/f1_cache')
+cache_dir.mkdir(parents=True, exist_ok=True)
+fastf1.Cache.enable_cache(str(cache_dir))
 
+## Load one session (2026, round 1, Race)
+session = fastf1.get_session(2026, 1, "R")
+session.load(telemetry=True, weather=False, messages=False)
+
+## See Laps
+laps = session.laps
+print(laps[['Driver', 'LapNumber', 'LapTime']].head())
+
+## Telemetry for one lap (fastest lap of one driver)
+lap = laps.pick_drivers('VER').pick_fastest()
+car = laps.get_car_data().add_distance()
+car_pl = pl.from_pandas(
+    car[['Distance', 'Speed', 'Throttle', 'nGear', 'RPM', 'Brake']]
+)
+print(car_pl.head())
+
+## Corner Locations (to find straights)
+corners = session.get_circuit_info().corners
+print(corners[['Number', 'Distance']])
+```
