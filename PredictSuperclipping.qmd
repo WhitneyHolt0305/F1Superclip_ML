@@ -27,6 +27,7 @@ import json
 import time
 from datetime import datetime, timezone
 from urllib.request import urlopen
+from urllib.error import HTTPError
 
 import numpy as np
 import polars as pl
@@ -38,7 +39,7 @@ BASE = 'https://api.openf1.org/v1'
 FULL_THROTTLE = 99    ## throttle % that counts as "flat out"
 MIN_STRAIGHT_M = 200  ## shortest flat-out stretch that counts as a straight (meters)
 CLIP_READINGS = 4     ## readings in a row with no speed gain = superclip (~1 second)
-PAUSE = 0.5           ## seconds between downloads (be polite to OpenF1)
+PAUSE = 1           ## seconds between downloads (be polite to OpenF1)
 
 FMT = '%Y-%m-%dT%H:%M:%S%.f%z'
 RAW_DIR = here('data/raw')
@@ -47,11 +48,21 @@ RAW_DIR.mkdir(parents=True, exist_ok=True)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 ## Download from OpenF1 and return a polars table
-def get_openf1(endpoint):
-    with urlopen(f'{BASE}/{endpoint}') as response:
-        data = json.loads(response.read().decode('utf-8'))
-    time.sleep(PAUSE)
-    return pl.DataFrame(data)
+def get_openf1(endpoint, tries = 5):
+    for attempt in range(tries):
+        try:
+            with urlopen(f'{BASE}/{endpoint}') as response:
+                data = json.loads(response.read().decode('utf-8'))
+            time.sleep(PAUSE)
+            return pl.DataFrame(data)
+        except HTTPError as e:
+            if e.code == 404:      ## no data for this request
+                return pl.DataFrame()
+            if e.code == 429:      ## too many requests - wait, then retry
+                time.sleep(10 * (attempt + 1))
+                continue
+            raise
+    raise RuntimeError(f'Gave up after {tries} tries: {endpoint}')
 
 ## All 2026 races that have already happened
 def get_past_races(year = 2026):
@@ -59,6 +70,7 @@ def get_past_races(year = 2026):
     return (get_openf1(f'sessions?year={year}&session_name=Race')
         .with_columns(pl.col('date_start').str.to_datetime(FMT, time_zone = 'UTC'))
         .filter(pl.col('date_start') < now)
+        .filter(~pl.col('circuit_short_name').is_in(['Sakhir', 'Jeddah']))  ## cancelled in 2026
         .select('session_key', 'circuit_short_name', 'date_start')
     )
 ```
@@ -72,12 +84,12 @@ def get_driver_laps(key, num):
         return None
 
     ## turn date text into real times
-    car = car.with_columns(pl.col('date').str.to_datetime(FMT, time_zone = 'UTC'))
+    car = car.with_columns(pl.col('date').cast(pl.String).str.to_datetime(FMT, time_zone = 'UTC'))
 
     ## keep laps with a time (drops lap 1 and the last lap), find when each lap ends
     laps_ok = (laps
         .filter(pl.col('lap_duration').is_not_null() & pl.col('date_start').is_not_null())
-        .with_columns(pl.col('date_start').str.to_datetime(FMT, time_zone = 'UTC'))
+        .with_columns(pl.col('date_start').cast(pl.String).str.to_datetime(FMT, time_zone = 'UTC'))
         .with_columns(
             lap_end = pl.col('date_start')
             + pl.duration(milliseconds = (pl.col('lap_duration') * 1000).cast(pl.Int64))
@@ -315,6 +327,7 @@ track_rate = (straights
 - **Straight:** flat out (throttle ≥ 99%) for at least 200 m.
 - **Superclip:** speed doesn't rise for 4 readings in a row (about 1 second) while flat out.
 - **Watch out (validity):** on a long straight, a car can stop speeding up because of air drag at top speed, not because the battery ran out. Some superclips may really be the car hitting top speed.
+- Bahrain and Saudi Arabia were cancelled in 2026 (issues in the Middle East), so they won't be in the data.
 
 
 Jake Here
