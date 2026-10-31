@@ -1,0 +1,349 @@
+---
+title: "Project | F1 Superclipping"
+author: "Whitney Holt"
+format: typst
+---
+
+# Milestone 14
+
+### The Data Story
+
+Each row is one **straight** on one lap, for one driver, in one 2026 race.
+The outcome is whether the car **superclipped** on that straight (1 = yes, 0 = no).
+
+**Superclip (our definition):** the driver is flat out on the throttle, but the
+speed is dropping or not rising anymore, because the battery has run out of energy to deploy.
+
+### Get the Data
+
+The data comes from **OpenF1** (api.openf1.org). Past races are free and need no login.
+(FastF1 now needs a paid F1 TV login, so we used OpenF1 instead.)
+
+The first run downloads every race and takes about 15–30 minutes.
+Each race is saved as it finishes, so later runs skip the download and are fast.
+
+```{python}
+import json
+import time
+from datetime import datetime, timezone
+from urllib.request import urlopen
+
+import numpy as np
+import polars as pl
+from plotnine import *
+from pyprojroot.here import here
+
+## Settings - the group can tweak these
+BASE = 'https://api.openf1.org/v1'
+FULL_THROTTLE = 99    ## throttle % that counts as "flat out"
+MIN_STRAIGHT_M = 200  ## shortest flat-out stretch that counts as a straight (meters)
+CLIP_READINGS = 4     ## readings in a row with no speed gain = superclip (~1 second)
+PAUSE = 0.5           ## seconds between downloads (be polite to OpenF1)
+
+FMT = '%Y-%m-%dT%H:%M:%S%.f%z'
+RAW_DIR = here('data/raw')
+OUT_DIR = here('data/processed')
+RAW_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+## Download from OpenF1 and return a polars table
+def get_openf1(endpoint):
+    with urlopen(f'{BASE}/{endpoint}') as response:
+        data = json.loads(response.read().decode('utf-8'))
+    time.sleep(PAUSE)
+    return pl.DataFrame(data)
+
+## All 2026 races that have already happened
+def get_past_races(year = 2026):
+    now = datetime.now(timezone.utc)
+    return (get_openf1(f'sessions?year={year}&session_name=Race')
+        .with_columns(pl.col('date_start').str.to_datetime(FMT, time_zone = 'UTC'))
+        .filter(pl.col('date_start') < now)
+        .select('session_key', 'circuit_short_name', 'date_start')
+    )
+```
+
+```{python}
+## One driver's race: telemetry matched to laps, plus distance along each lap
+def get_driver_laps(key, num):
+    car = get_openf1(f'car_data?session_key={key}&driver_number={num}')
+    laps = get_openf1(f'laps?session_key={key}&driver_number={num}')
+    if car.is_empty() or laps.is_empty():
+        return None
+
+    ## turn date text into real times
+    car = car.with_columns(pl.col('date').str.to_datetime(FMT, time_zone = 'UTC'))
+
+    ## keep laps with a time (drops lap 1 and the last lap), find when each lap ends
+    laps_ok = (laps
+        .filter(pl.col('lap_duration').is_not_null() & pl.col('date_start').is_not_null())
+        .with_columns(pl.col('date_start').str.to_datetime(FMT, time_zone = 'UTC'))
+        .with_columns(
+            lap_end = pl.col('date_start')
+            + pl.duration(milliseconds = (pl.col('lap_duration') * 1000).cast(pl.Int64))
+        )
+        .select('lap_number', 'date_start', 'lap_end', 'is_pit_out_lap')
+        .sort('date_start')
+    )
+    if laps_ok.is_empty():
+        return None
+
+    ## give each telemetry row its lap number (also drops garage/grid rows)
+    car_laps = (car
+        .sort('date')
+        .join_asof(laps_ok, left_on = 'date', right_on = 'date_start', strategy = 'backward')
+        .filter(pl.col('date') < pl.col('lap_end'))
+    )
+
+    ## distance = speed (km/h -> m/s) x time between readings, added up over the lap
+    car_laps = (car_laps
+        .with_columns(
+            secs = pl.col('date').diff().over('lap_number').dt.total_milliseconds().fill_null(0) / 1000
+        )
+        .with_columns(
+            distance = (pl.col('speed') / 3.6 * pl.col('secs')).cum_sum().over('lap_number')
+        )
+    )
+
+    return car_laps.select(
+        'date', 'lap_number', 'is_pit_out_lap', 'distance',
+        'speed', 'throttle', 'brake', 'n_gear', 'rpm'
+    )
+```
+
+```{python}
+## Find straights (flat-out stretches) and flag superclips
+def find_straights(car_laps):
+    df = (car_laps
+        .sort('lap_number', 'date')
+        .with_columns(flat = pl.col('throttle') >= FULL_THROTTLE)
+        ## new ID every time "flat out" switches on or off (within a lap)
+        .with_columns(
+            run_id = (pl.col('flat') != pl.col('flat').shift(1))
+            .fill_null(True).cum_sum().over('lap_number')
+        )
+        .filter(pl.col('flat'))
+        ## not rising = speed is the same or lower than the reading before
+        .with_columns(
+            not_rising = (pl.col('speed').diff() <= 0)
+            .fill_null(False).over('lap_number', 'run_id')
+        )
+        ## count how many "not rising" readings come in a row
+        .with_columns(
+            stall_id = (pl.col('not_rising') != pl.col('not_rising').shift(1))
+            .fill_null(True).cum_sum().over('lap_number', 'run_id')
+        )
+        .with_columns(
+            stall_len = pl.when(pl.col('not_rising'))
+            .then(pl.len().over('lap_number', 'run_id', 'stall_id'))
+            .otherwise(0)
+        )
+    )
+
+    ## one row per straight
+    ## note: a straight that crosses the start/finish line gets split in two
+    return (df
+        .group_by('lap_number', 'run_id')
+        .agg(
+            pit_out_lap = pl.col('is_pit_out_lap').first(),
+            start_m = pl.col('distance').first(),
+            length_m = pl.col('distance').last() - pl.col('distance').first(),
+            entry_speed = pl.col('speed').first(),
+            max_speed = pl.col('speed').max(),
+            exit_speed = pl.col('speed').last(),
+            longest_stall = pl.col('stall_len').max()
+        )
+        .filter(pl.col('length_m') >= MIN_STRAIGHT_M)
+        .with_columns(superclip = (pl.col('longest_stall') >= CLIP_READINGS).cast(pl.Int8))
+        .sort('lap_number', 'start_m')
+        .with_columns(straight_num = pl.int_range(1, pl.len() + 1).over('lap_number'))
+        .drop('run_id')
+    )
+```
+
+```{python}
+#| output: false
+## Loop over every race and driver (skips races already saved)
+races = get_past_races()
+
+for race in races.iter_rows(named = True):
+    key, track = race['session_key'], race['circuit_short_name']
+    race_file = RAW_DIR / f'straights_{key}.parquet'
+    if race_file.exists():
+        continue
+
+    print(f'Pulling {track}...')
+    drivers = get_openf1(f'drivers?session_key={key}')
+    results = []
+
+    for d in drivers.iter_rows(named = True):
+        num = d['driver_number']
+        try:
+            car_laps = get_driver_laps(key, num)
+            if car_laps is None:
+                continue
+            results.append(
+                find_straights(car_laps).with_columns(
+                    session_key = pl.lit(key),
+                    circuit = pl.lit(track),
+                    driver_number = pl.lit(num),
+                    driver = pl.lit(d['name_acronym']),
+                    team = pl.lit(d['team_name'])
+                )
+            )
+        except Exception as e:
+            print(f'  Problem with driver {num}: {e}')
+
+    if results:
+        pl.concat(results, how = 'vertical_relaxed').write_parquet(race_file)
+
+## Combine every race into one file
+files = sorted(RAW_DIR.glob('straights_*.parquet'))
+straights = pl.concat([pl.read_parquet(f) for f in files], how = 'vertical_relaxed')
+straights.write_parquet(OUT_DIR / 'straights_2026.parquet')
+```
+
+## Look at the data
+
+```{python}
+## Size of the data
+pl.DataFrame({
+    'races': [straights['session_key'].n_unique()],
+    'drivers': [straights['driver'].n_unique()],
+    'straights': [straights.height],
+    'share_superclip': [round(straights['superclip'].mean(), 3)]
+})
+```
+
+```{python}
+## Count of each outcome
+(straights
+  .group_by(pl.col('superclip'))
+  .agg(n = pl.len())
+  .sort('superclip')
+)
+```
+
+```{python}
+## Plot 1 - Superclip rate by straight length
+length_rate = (straights
+  .with_columns(
+    length_group = pl.when(pl.col('length_m') < 400).then(pl.lit('1: 200-400'))
+      .when(pl.col('length_m') < 600).then(pl.lit('2: 400-600'))
+      .when(pl.col('length_m') < 800).then(pl.lit('3: 600-800'))
+      .when(pl.col('length_m') < 1000).then(pl.lit('4: 800-1000'))
+      .otherwise(pl.lit('5: 1000+'))
+  )
+  .group_by(pl.col('length_group'))
+  .agg(
+    n = pl.len(),
+    rate = pl.col('superclip').mean()
+  )
+)
+
+(ggplot(
+  length_rate,
+  aes(x = 'length_group', y = 'rate')
+)
+  + geom_col()
+  + labs(
+    title = 'Superclip Rate by Straight Length',
+    subtitle = 'Do longer straights drain the battery more?',
+    x = 'Straight length (meters)',
+    y = 'Share superclipped'
+  )
+)
+```
+
+```{python}
+## Plot 2 - Superclip rate by team
+team_rate = (straights
+  .group_by(pl.col('team'))
+  .agg(
+    n = pl.len(),
+    rate = pl.col('superclip').mean()
+  )
+  .sort('rate')
+)
+
+(ggplot(
+  team_rate,
+  aes(x = 'reorder(team, rate)', y = 'rate')
+)
+  + geom_col()
+  + coord_flip()
+  + labs(
+    title = 'Superclip Rate by Team',
+    subtitle = 'Different power units may manage energy differently',
+    x = '',
+    y = 'Share superclipped'
+  )
+)
+```
+
+```{python}
+## Plot 3 - Superclip rate by track
+track_rate = (straights
+  .group_by(pl.col('circuit'))
+  .agg(
+    n = pl.len(),
+    rate = pl.col('superclip').mean()
+  )
+)
+
+(ggplot(
+  track_rate,
+  aes(x = 'reorder(circuit, rate)', y = 'rate')
+)
+  + geom_col()
+  + coord_flip()
+  + labs(
+    title = 'Superclip Rate by Track',
+    subtitle = 'Power tracks with long straights should be higher',
+    x = '',
+    y = 'Share superclipped'
+  )
+)
+```
+
+## Data Notes
+
+- **Source:** OpenF1 car telemetry (about 4 readings per second): speed, throttle, gear, brake, RPM.
+- **Laps dropped:** lap 1 (standing start) and the last lap. OpenF1 doesn't give them a lap time.
+- **Distance:** OpenF1 doesn't give distance, so we worked it out from speed × time. Each lap comes out about 1–2% shorter than the real track, which is close enough.
+- **DRS:** dropped. DRS was removed for 2026, so the column is empty.
+- **Straight:** flat out (throttle ≥ 99%) for at least 200 m.
+- **Superclip:** speed doesn't rise for 4 readings in a row (about 1 second) while flat out.
+- **Watch out (validity):** on a long straight, a car can stop speeding up because of air drag at top speed, not because the battery ran out. Some superclips may really be the car hitting top speed.
+
+
+Jake Here
+
+# Assumption Checks
+
+## Explanations of Assumptions
+
+## Validity
+
+## Representativeness
+
+## Linearity
+
+## Independence
+
+## Constant Variance and Normality
+
+## Identifiability
+
+
+Jackson Here
+
+# Milestone 15
+
+## Fit the Model
+
+## Parameter Estimates on Three Scales
+
+## Interpretations
+
+## Summary: what story is taking shape?

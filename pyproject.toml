@@ -12,6 +12,7 @@ dependencies = [
     "bambi>=0.21.0",
     "fastf1>=3.8",
     "numpy>=2.5.4",
+    "plotnine>=0.15.8",
     "polars>=2.0.0",
     "pyarrow>=26.0.0",
     "pyprojroot>=0.3.0",
