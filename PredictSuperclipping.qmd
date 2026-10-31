@@ -329,27 +329,352 @@ track_rate = (straights
 - **Watch out (validity):** on a long straight, a car can stop speeding up because of air drag at top speed, not because the battery ran out. Some superclips may really be the car hitting top speed.
 - Bahrain and Saudi Arabia were cancelled in 2026 (issues in the Middle East), so they won't be in the data.
 
-
-Jake Here
-
 # Assumption Checks
 
 ## Explanations of Assumptions
 
+We evaluate validity, representativeness, linearity, independence, and identifiability for logistic regression. These checks assess whether our variables measure the intended outcome, whether the sample covers the population of interest, and whether the model supports reliable estimation.
+
+Our outcome is `superclip`, coded as 1 for a detected superclip and 0 otherwise. The saved dataset contains session, event, driver, lap, straight length, speed drop, superclip status, and time lost.
+
+```{python}
+import numpy as np
+import pandas as pd
+import polars as pl
+import matplotlib.pyplot as plt
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+
+from pyprojroot.here import here
+from statsmodels.nonparametric.smoothers_lowess import lowess
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+# Load saved data without calling OpenF1
+straights = pl.read_parquet(here("data/straights.parquet"))
+
+print("Number of observations:", straights.height)
+print("Columns:", straights.columns)
+```
+
 ## Validity
+
+Validity asks whether the variables measure what we need for our project. Straight length, lap, event, and driver provide information that could help explain superclipping. However, the saved file alone does not establish how the outcome was created or whether it accurately identifies battery-related superclipping.
+
+The following checks examine missing values, binary outcome coding, and straight lengths.
+
+```{python}
+print("Missing values:")
+print(straights.null_count())
+
+print("\nOutcome counts:")
+print(
+    straights.group_by("superclip")
+    .agg(n=pl.len())
+    .sort("superclip")
+)
+
+print("\nOutcome contains only 0 and 1:",
+      straights["superclip"].drop_nulls().is_in([0, 1]).all())
+
+print("\nStraight length summary:")
+print(straights.select("straight_m").describe())
+
+print("\nStraights shorter than 200 meters:")
+print(straights.filter(pl.col("straight_m") < 200).height)
+
+print("\nNonpositive straight lengths:")
+print(straights.filter(pl.col("straight_m") <= 0).height)
+```
+
+Correct coding supports internal consistency but does not prove measurement validity. We need to confirm how this saved dataset was created and how its superclip labels were defined. If the labels were based on a speed plateau at full throttle, reaching top speed or track gradient could produce similar patterns without battery depletion.
+
+The saved file does not contain the consecutive-reading measurements needed to verify the four-reading rule described in the data story. We should confirm that the data story matches this file and review example telemetry against an independent reference.
+
+We exclude `speed_drop_kmh` and `time_lost_s` from the working model because they may be consequences of superclipping or may have been used to define it. Their use could give the model information unavailable before the event. We also need to confirm whether `straight_m` measures known track geometry or a distance calculated after observing the straight.
 
 ## Representativeness
 
+Representativeness asks whether the observations reflect the population we want to study. We inspect coverage across events, drivers, and sessions. The contents of the file alone cannot establish whether all intended events and participants were collected.
+
+```{python}
+print("Dataset coverage:")
+print(
+    straights.select(
+        pl.len().alias("observations"),
+        pl.col("event").n_unique().alias("events"),
+        pl.col("driver").n_unique().alias("drivers"),
+        pl.col("superclip").mean().alias("superclip_rate")
+    )
+)
+
+print("\nCoverage by event:")
+print(
+    straights.group_by("event")
+    .agg(
+        observations=pl.len(),
+        drivers=pl.col("driver").n_unique(),
+        superclip_rate=pl.col("superclip").mean()
+    )
+    .sort("event")
+)
+
+print("\nCoverage by driver:")
+print(
+    straights.group_by("driver")
+    .agg(
+        observations=pl.len(),
+        events=pl.col("event").n_unique(),
+        superclip_rate=pl.col("superclip").mean()
+    )
+    .sort("driver")
+)
+
+print("\nSession categories:")
+print(
+    straights.group_by("session")
+    .agg(observations=pl.len())
+    .sort("session")
+)
+```
+
+Unequal observation counts may reflect track layout, race length, retirements, or missing data. Differences require investigation rather than automatically indicating bias.
+
+We should compare the included events and drivers with the intended population and confirm any exclusions made during collection. Missing values within this file do not capture entire observations omitted before the file was saved. Until collection and coverage are verified, conclusions should be limited to the observations represented in this dataset.
+
 ## Linearity
+
+Logistic regression assumes the specified numeric predictors have an additive relationship with the log-odds of the outcome. The probability itself does not need to follow a straight line.
+
+Our working model uses straight length and lap as numeric predictors, with event and driver treated as categorical predictors. This assumes that an additional 100 meters and an additional lap each have a constant effect on log-odds, holding other predictors fixed.
+
+Following the lecture slides, we use a linear probability model as an approximate residual diagnostic.
+
+```{python}
+# Prepare data for statsmodels
+assumption_df = pd.DataFrame(straights.to_dict(as_series=False))
+
+# Ensure model variables are numeric where appropriate
+for column in ["superclip", "straight_m", "lap"]:
+    assumption_df[column] = pd.to_numeric(
+        assumption_df[column], errors="coerce"
+    )
+
+required_columns = [
+    "superclip", "straight_m", "lap", "event", "driver"
+]
+
+rows_before = len(assumption_df)
+
+assumption_df = (
+    assumption_df.replace([np.inf, -np.inf], np.nan)
+    .dropna(subset=required_columns)
+    .reset_index(drop=True)
+)
+
+print("Rows excluded for missing or nonfinite model variables:",
+      rows_before - len(assumption_df))
+
+# Express length in hundreds of meters
+assumption_df["straight_100m"] = assumption_df["straight_m"] / 100
+
+# Match this formula to the group's final model
+assumption_formula = (
+    "superclip ~ straight_100m + lap + C(event) + C(driver)"
+)
+
+# Linear probability model for the lecture-style diagnostic
+assumption_lpm = smf.ols(
+    formula=assumption_formula,
+    data=assumption_df
+).fit()
+
+diagnostic_points = pd.DataFrame({
+    "fitted": assumption_lpm.fittedvalues,
+    "residual": assumption_lpm.resid
+}).sample(
+    n=min(3000, len(assumption_df)),
+    random_state=42
+)
+
+smooth = lowess(
+    diagnostic_points["residual"],
+    diagnostic_points["fitted"],
+    frac=0.5
+)
+
+plt.figure(figsize=(8, 4))
+plt.scatter(
+    diagnostic_points["fitted"],
+    diagnostic_points["residual"],
+    alpha=0.2,
+    s=10
+)
+plt.plot(smooth[:, 0], smooth[:, 1], color="red")
+plt.axhline(0, color="black", linestyle="--")
+plt.xlabel("Fitted Values from Linear Probability Model")
+plt.ylabel("Residuals")
+plt.title("Approximate Linearity Diagnostic")
+plt.tight_layout()
+plt.show()
+```
+
+A roughly horizontal smooth line near zero provides limited support for the working functional form. Strong systematic curvature suggests investigating transformations, nonlinear terms, or interactions.
+
+Two residual bands are expected because the outcome is binary. This is an approximate diagnostic: a linear probability model can show curvature even when a logistic model is appropriate. Therefore, this plot alone cannot establish that the logistic linearity assumption is satisfied.
 
 ## Independence
 
+Independence asks whether observations provide separate information after accounting for the predictors. Repeated straights from the same driver, session, event, or lap may share energy conditions, car characteristics, and race strategy.
+
+The following checks document repeated observations within driver-session and driver-lap groups.
+
+```{python}
+driver_session_counts = (
+    straights.group_by(["event", "session", "driver"])
+    .agg(observations=pl.len())
+)
+
+driver_lap_counts = (
+    straights.group_by(["event", "session", "driver", "lap"])
+    .agg(observations=pl.len())
+)
+
+print("Observations per driver-session:")
+print(driver_session_counts.select("observations").describe())
+
+print("\nObservations per driver-lap:")
+print(driver_lap_counts.select("observations").describe())
+
+print("\nDriver-session groups with repeated observations:")
+print(
+    driver_session_counts
+    .filter(pl.col("observations") > 1)
+    .height
+)
+
+print("\nDriver-lap groups with repeated observations:")
+print(
+    driver_lap_counts
+    .filter(pl.col("observations") > 1)
+    .height
+)
+```
+
+Repeated observations do not directly prove residual dependence, but they give us reason to question independence in an ordinary logistic model. Including event and driver indicators can explain some shared conditions without eliminating all dependence.
+
+A multilevel logistic model could account for shared group effects. Appropriately clustered standard errors are another possible approach for inference, depending on the number and structure of the groups. We should interpret ordinary standard errors and confidence intervals cautiously until dependence is addressed.
+
+Training and testing splits should also account for related observations, especially when the goal is to predict new events.
+
 ## Constant Variance and Normality
+
+Constant error variance and normally distributed residuals are not assumptions of binomial logistic regression.
+
+For a binary outcome, the conditional variance is p(1 - p), where p is the probability of superclipping. The variance naturally changes with the probability. Residuals are also not expected to follow a normal distribution.
+
+Therefore, normality and constant-variance tests are not required to validate this logistic model.
 
 ## Identifiability
 
+Identifiability asks whether the data allow distinct, stable coefficient estimates. Problems can arise from redundant predictors, strong multicollinearity, or separation. Separation occurs when predictors perfectly distinguish the two outcomes.
 
-Jackson Here
+We examine numeric correlations, the rank of the model matrix, variance inflation factors, and outcome counts by category.
+
+```{python}
+print("Numeric predictor correlations:")
+print(
+    assumption_df[["straight_100m", "lap"]]
+    .corr()
+    .round(3)
+)
+
+# The same predictor matrix is used by the working logistic model
+X = np.asarray(assumption_lpm.model.exog, dtype=float)
+term_names = assumption_lpm.model.exog_names
+
+rank = np.linalg.matrix_rank(X)
+
+print("\nDesign matrix rank:", rank)
+print("Number of columns:", X.shape[1])
+print("Full column rank:", rank == X.shape[1])
+
+if rank == X.shape[1]:
+    vif_table = pd.DataFrame({
+        "Term": term_names,
+        "VIF": [
+            variance_inflation_factor(X, i)
+            for i in range(X.shape[1])
+        ]
+    })
+
+    print("\nVariance inflation factors:")
+    print(
+        vif_table[vif_table["Term"] != "Intercept"]
+        .round(3)
+        .to_string(index=False)
+    )
+else:
+    print("Resolve redundant predictors before interpreting coefficients.")
+
+for category in ["event", "driver"]:
+    print(f"\nOutcome counts by {category}:")
+    print(pd.crosstab(
+        assumption_df[category],
+        assumption_df["superclip"]
+    ))
+```
+
+Full column rank indicates no exact linear dependence among the model terms. VIF values near 1 suggest little multicollinearity; values above approximately 5 warrant investigation. Individual categorical-indicator VIFs depend on category coding and should be interpreted alongside the model structure.
+
+Categories containing only one outcome can signal separation, although these tables do not detect every possible form of separation. We also inspect convergence, coefficients, and standard errors when fitting the logistic model.
+
+```{python}
+from statsmodels.tools.sm_exceptions import PerfectSeparationError
+
+# Only fit if the outcome has both classes and the matrix is full rank
+if rank != X.shape[1]:
+    print("Logistic fit skipped: resolve redundant predictors first.")
+
+elif set(assumption_df["superclip"].unique()) != {0, 1}:
+    print("Logistic fit requires both outcome classes, coded 0 and 1.")
+
+else:
+    try:
+        assumption_logit = smf.glm(
+            formula=assumption_formula,
+            data=assumption_df,
+            family=sm.families.Binomial()
+        ).fit()
+
+        print("Model converged:", assumption_logit.converged)
+
+        print("\nCoefficient estimates and standard errors:")
+        print(
+            pd.DataFrame({
+                "Estimate": assumption_logit.params,
+                "SE": assumption_logit.bse
+            }).round(3).to_string()
+        )
+
+        print("\nAll estimates and standard errors finite:",
+              bool(
+                  np.isfinite(assumption_logit.params).all()
+                  and np.isfinite(assumption_logit.bse).all()
+              ))
+
+    except PerfectSeparationError:
+        print(
+            "Perfect separation detected. "
+            "Ordinary logistic coefficient estimates are not reliable."
+        )
+```
+
+Convergence and finite estimates support numerical stability but do not prove that separation is absent. Separation warnings, unusually large coefficients, and large standard errors require investigation.
+
+Possible remedies include removing redundant terms, reconsidering sparse categories when substantively justified, or using an appropriate penalized model. These diagnostics must be repeated if the final model uses different predictors.
+
+
+Jake Here
 
 # Milestone 15
 
