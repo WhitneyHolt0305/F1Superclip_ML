@@ -6,35 +6,86 @@ author: "Whitney Holt, Jake Hough, Jackson Ferry"
 
 ## Imports
 ```{python}
-import fastf1
+import json
+from urllib.request import urlopen
 import polars as pl
 from pyprojroot import here
 ```
 
 ## Save Downloads
 ```{python}
-## Cache - saves downloads so we don't have to redownload every time
-cache_dir = here('data/f1_cache')
-cache_dir.mkdir(parents=True, exist_ok=True)
-fastf1.Cache.enable_cache(str(cache_dir))
+BASE = 'https://api.openf1.org/v1'
 
-## Load one session (2026, round 1, Race)
-session = fastf1.get_session(2026, 1, "R")
-session.load(telemetry=True, weather=False, messages=False)
+def get_openf1(endpoint):
+    """Download from OpenF1 and return a polars table."""
+    with urlopen(f'{BASE}/{endpoint}') as response:
+        data = json.loads(response.read().decode('utf-8'))
+    return pl.DataFrame(data)
 
-## See Laps
-laps = session.laps
-print(laps[['Driver', 'LapNumber', 'LapTime']].head())
+## List all 2026 races
+sessions = get_openf1("sessions?year=2026&session_name=Race")
+print(sessions.select("session_key", "circuit_short_name", "date_start"))
 
-## Telemetry for one lap (fastest lap of one driver)
-lap = laps.pick_drivers('VER').pick_fastest()
-car = laps.get_car_data().add_distance()
-car_pl = pl.from_pandas(
-    car[['Distance', 'Speed', 'Throttle', 'nGear', 'RPM', 'Brake']]
+
+## Pick first race
+key = sessions['session_key'][0]
+
+## See drivers in that race
+drivers = get_openf1(f"drivers?session_key={key}")
+print(drivers.select('driver_number', 'name_acronym', 'team_name'))
+
+## Get telemetry for one driver
+num = drivers['driver_number'][0]
+car = get_openf1(f"car_data?session_key={key}&driver_number={num}")
+print(car.head())
+print(car.shape)
+
+## Save a copy so we don't download again
+out = here('data/raw')
+out.mkdir(parents=True, exist_ok=True)
+car.write_parquet(out / f'car_{key}_{num}.parquet')
+```
+
+## Get LapTimes
+```{python}
+laps = get_openf1(f'laps?session_key={key}&driver_number={num}')
+print(laps.select('lap_number', 'date_start', 'lap_duration'))
+print(laps.shape)
+```
+
+## Matching Telemetry to Laps, Then Add Distance
+```{python}
+FMT = "%Y-%m-%dT%H:%M:%S%.f%z"
+
+## Turn date text into real times
+car = car.with_columns(pl.col('date').str.to_datetime(FMT, time_zone='UTC'))
+laps = laps.with_columns(pl.col('date_start').str.to_datetime(FMT, time_zone='UTC'))
+
+## Keep laps that have a time and find when each lap ends
+laps_ok = (
+    laps
+    .filter(pl.col('lap_duration').is_not_null())
+    .with_columns(
+        lap_end=pl.col('date_start')
+        + pl.duration(milliseconds=(pl.col('lap_duration') * 1000).cast(pl.Int64))
+    )
+    .select('lap_number', 'date_start', 'lap_end')
+    .sort('date_start')
 )
-print(car_pl.head())
 
-## Corner Locations (to find straights)
-corners = session.get_circuit_info().corners
-print(corners[['Number', 'Distance']])
+## Give each telemetry row it's lap number
+car_laps = (
+    car.sort('date')
+    .join_asof(laps_ok, left_on='date', right_on='date_start', strategy='backward')
+    .filter(pl.col('date') < pl.col('lap_end'))
+)
+
+## Distance along each lap (meters)
+car_laps = car_laps.with_columns(
+    secs=pl.col('date').diff().over('lap_number').dt.total_milliseconds().fill_null(0) / 1000).with_columns(
+        distance=(pl.col('speed') / 3.6 * pl.col('secs')).cum_sum().over('lap_number')
+)
+
+## Check - each lap should be about 5,300 m (Melbourne's length)
+print(car_laps.group_by('lap_number').agg(pl.col('distance').max()).sort('lap_number'))
 ```
