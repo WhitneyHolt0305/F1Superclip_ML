@@ -674,7 +674,6 @@ Convergence and finite estimates support numerical stability but do not prove th
 Possible remedies include removing redundant terms, reconsidering sparse categories when substantively justified, or using an appropriate penalized model. These diagnostics must be repeated if the final model uses different predictors.
 
 
-Jake Here
 
 # Milestone 15
 
