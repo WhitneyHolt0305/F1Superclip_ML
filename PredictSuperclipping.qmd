@@ -176,7 +176,11 @@ def find_straights(car_laps):
 ```{python}
 #| output: false
 ## Loop over every race and driver (skips races already saved)
-races = get_past_races()
+try:
+    races = get_past_races()
+except HTTPError as e:
+    print(f'Could not reach OpenF1 ({e}). Using the races saved so far.')
+    races = pl.DataFrame()
 
 for race in races.iter_rows(named = True):
     key, track = race['session_key'], race['circuit_short_name']
@@ -185,8 +189,13 @@ for race in races.iter_rows(named = True):
         continue
 
     print(f'Pulling {track}...')
-    drivers = get_openf1(f'drivers?session_key={key}')
+    try:
+        drivers = get_openf1(f'drivers?session_key={key}')
+    except HTTPError as e:
+        print(f'  Stopped at {track}: {e}. Using the races saved so far.')
+        break
     results = []
+    blocked = False
 
     for d in drivers.iter_rows(named = True):
         num = d['driver_number']
@@ -203,15 +212,31 @@ for race in races.iter_rows(named = True):
                     team = pl.lit(d['team_name'])
                 )
             )
+        except HTTPError as e:
+            if e.code == 401:      ## blocked by OpenF1 - stop, don't save a half race
+                print(f'  Blocked at {track}: {e}. Using the races saved so far.')
+                blocked = True
+                break
+            print(f'  Problem with driver {num}: {e}')
         except Exception as e:
             print(f'  Problem with driver {num}: {e}')
 
+    if blocked:
+        break
     if results:
         pl.concat(results, how = 'vertical_relaxed').write_parquet(race_file)
 
 ## Combine every race into one file
 files = sorted(RAW_DIR.glob('straights_*.parquet'))
-straights = pl.concat([pl.read_parquet(f) for f in files], how = 'vertical_relaxed')
+straights = (pl.concat([pl.read_parquet(f) for f in files], how = 'vertical_relaxed')
+    ## extra column names used in the assumption checks
+    .with_columns(
+        event = pl.col('circuit'),
+        session = pl.lit('Race'),
+        lap = pl.col('lap_number'),
+        straight_m = pl.col('length_m')
+    )
+)
 straights.write_parquet(OUT_DIR / 'straights_2026.parquet')
 ```
 
@@ -225,6 +250,16 @@ pl.DataFrame({
     'straights': [straights.height],
     'share_superclip': [round(straights['superclip'].mean(), 3)]
 })
+```
+
+```{python}
+## Drivers per race - most should be 20-22
+## (if one race is much lower, delete its file in data/raw and re-run the loop)
+(straights
+  .group_by('circuit')
+  .agg(drivers = pl.col('driver').n_unique(), straights = pl.len())
+  .sort('drivers')
+)
 ```
 
 ```{python}
@@ -327,7 +362,9 @@ track_rate = (straights
 - **Straight:** flat out (throttle ≥ 99%) for at least 200 m.
 - **Superclip:** speed doesn't rise for 4 readings in a row (about 1 second) while flat out.
 - **Watch out (validity):** on a long straight, a car can stop speeding up because of air drag at top speed, not because the battery ran out. Some superclips may really be the car hitting top speed.
-- Bahrain and Saudi Arabia were cancelled in 2026 (issues in the Middle East), so they won't be in the data.
+- **Races missing:** Bahrain and Saudi Arabia were cancelled in 2026 (Middle East conflict), so they aren't in the data.
+- **Drivers missing:** a few drivers are missing from some races, usually because they didn't start.
+- **Saved file:** `data/processed/straights_2026.parquet`. It also has `event`, `session`, `lap`, and `straight_m` columns so the assumption checks can use it.
 
 # Assumption Checks
 
@@ -350,7 +387,7 @@ from statsmodels.nonparametric.smoothers_lowess import lowess
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 # Load saved data without calling OpenF1
-straights = pl.read_parquet(here("data/straights.parquet"))
+straights = pl.read_parquet(here("data/processed/straights_2026.parquet"))
 
 print("Number of observations:", straights.height)
 print("Columns:", straights.columns)
@@ -674,7 +711,7 @@ Convergence and finite estimates support numerical stability but do not prove th
 Possible remedies include removing redundant terms, reconsidering sparse categories when substantively justified, or using an appropriate penalized model. These diagnostics must be repeated if the final model uses different predictors.
 
 
-
+Jake Here
 
 # Milestone 15
 
