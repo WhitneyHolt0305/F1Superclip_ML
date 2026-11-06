@@ -948,6 +948,8 @@ def fit_and_predict(fit_data, prediction_data, seed):
 - Now for the main step. Tune the cutoff with five-fold cross-vaildation
 
 ```{python}
+from sklearn.model_selection import StratifiedGroupKFold
+
 cutoffs = np.arange(30, 71, 5) / 100
 fold_scores = []
 
