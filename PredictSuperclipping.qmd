@@ -711,14 +711,54 @@ Convergence and finite estimates support numerical stability but do not prove th
 Possible remedies include removing redundant terms, reconsidering sparse categories when substantively justified, or using an appropriate penalized model. These diagnostics must be repeated if the final model uses different predictors.
 
 
-Jake Here
-
 # Milestone 15
 
 ## Fit the Model
+```{python}
+# Fit logistic regression using maximum likelihood
+model = smf.logit(
+    formula="superclip ~ straight_100m + lap + C(event) + C(driver)",
+    data=assumption_df
+).fit()
 
-## Parameter Estimates on Three Scales
+# Summary: coefficients, standard errors, p-values, and 95% confidence intervals
+print(model.summary())
 
-## Interpretations
+# make the coefficient table easy to read
+# Coefficients and odds ratios with 95% confidence intervals
+ci = model.conf_int()
+
+parameter_table = pd.DataFrame({
+    "Coefficient": model.params,
+    "CI Lower": ci[0],
+    "CI Upper": ci[1],
+    "Odds Ratio": np.exp(model.params),
+    "OR CI Lower": np.exp(ci[0]),
+    "OR CI Upper": np.exp(ci[1]),
+    "p-value": model.pvalues
+})
+
+print(parameter_table.round(3).to_string())
+```
+
+## Parameter Estimates
+
+- Important thing to notice is these percentages describe changes in odds, not changes in probability. The omitted event and driver are the reference categories; their identities are not shown in this output.
+
+- For the straight length predictor, Each additional 100 meters is associated with a 0.575 increase in log-odds, or 77.7% higher odds of detected superclipping, holding all other factors constant. The 95% odds-ratio interval is 1.758–1.796.
+
+- For the lap predictor, Each additional lap is associated with approximately 0.17% higher odds of detected superclipping. The 95% odds-ratio interval is 1.001-1.003.
+
+- For the event predictor, Japan stood out, The odds are 16.4% higher than the reference event, with a 95%  
+odds-ratio interval of 1.048–1.293.
+
+- Another important thing to note with the event predictor, the Singapore event stood out with the odds approximately 99.4% lower than the reference event. This unusually large difference warrants checking the event’s outcome counts and detection patterns.
+
+-  For the driver predictor, Driver 16 stood out.  The odds are 122.4% higher than the reference driver, with a 95% odds-ratio interval of 1.964–2.519. This difference may reflect car, team, or strategy characteristics as well as driver differences.
+
 
 ## Summary: what story is taking shape?
+
+The initial model suggests that longer straights are associated with higher odds of detected superclipping, even after accounting for lap, event, and driver. Later laps show a small positive association, while differences across events and drivers remain after accounting for straight length.
+
+Together, these results suggest that track characteristics and differences associated with drivers, cars, or race strategies may help explain where superclipping occurs. However, the model identifies associations rather than causes: longer straights provide more opportunities to trigger the detection rule, and a speed plateau does not necessarily indicate battery depletion.
