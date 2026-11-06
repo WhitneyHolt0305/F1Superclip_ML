@@ -788,6 +788,16 @@ The initial model suggests that longer straights are associated with higher odds
 Together, these results suggest that track characteristics and differences associated with drivers, cars, or race strategies may help explain where superclipping occurs. However, the model identifies associations rather than causes: longer straights provide more opportunities to trigger the detection rule, and a speed plateau does not necessarily indicate battery depletion.
 
 
+- These percentages describe changes in odds, not changes in probability. The reference event is Austin and the reference driver is ALB.
+
+- **Straight length:** each additional 100 meters is associated with a 0.795 increase in log-odds, or about 121% higher odds of superclipping, holding other factors constant (95% odds-ratio interval: 2.186–2.243).
+
+- **Lap:** each additional lap is associated with about 0.6% higher odds of superclipping (95% odds-ratio interval: 1.004–1.007).
+
+- **Event:** the Hungaroring stood out, with odds about 8 times higher than Austin (95% interval: 7.25–9.25). Singapore had odds about 95% lower than Austin (95% interval: 0.041–0.054). Monte Carlo was similarly low.
+
+- **Driver:** ALO stood out, with odds about 2.7 times higher than ALB (95% interval: 2.36–3.08). This may reflect car, team, or strategy differences, not just the driver.
+
 # Milestone 16
 
 ## Setup Model
