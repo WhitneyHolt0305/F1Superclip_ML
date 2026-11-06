@@ -762,3 +762,64 @@ odds-ratio interval of 1.048–1.293.
 The initial model suggests that longer straights are associated with higher odds of detected superclipping, even after accounting for lap, event, and driver. Later laps show a small positive association, while differences across events and drivers remain after accounting for straight length.
 
 Together, these results suggest that track characteristics and differences associated with drivers, cars, or race strategies may help explain where superclipping occurs. However, the model identifies associations rather than causes: longer straights provide more opportunities to trigger the detection rule, and a speed plateau does not necessarily indicate battery depletion.
+
+
+# Milestone 16
+
+## Setup Model
+```{python}
+import arviz as az
+import bambi as bmb
+
+## Put lap on similar scale to straigth length (per 10 laps)
+assumption_df['lap_10'] = assumption_df['lap'] / 10
+
+## Priors only - no fitting yet (smaple is much faster)
+check_df = assumption_df.sample(n = 2000, random_state=42)
+
+ba_model = bmb.Model(
+    'superclip ~ straight_100m + lap_10 + (1|driver) + (1|event)', ## give each driver and track its own adjustment (per-driver, per-track)
+    data=check_df,
+    family='bernoulli'
+)
+ba_model
+```
+
+## Prior Predictive Check With Wide Priors
+```{python}
+from bambi import priors
+wide_priors = {
+    'Intercept': bmb.Prior('Normal', mu=0, sigma=100),
+    'straight_100m': bmb.Prior('Normal', mu=0, sigma=100),
+    'lap_10': bmb.Prior('Normal', mu=0, sigma=100),
+    "1|driver": bmb.Prior("Normal", mu = 0, sigma = bmb.Prior("HalfNormal", sigma = 100)),
+    "1|event": bmb.Prior("Normal", mu = 0, sigma = bmb.Prior("HalfNormal", sigma = 100))
+}
+
+ba_model.set_priors(priors=wide_priors)
+ba_model.build()
+wide_ppc = ba_model.prior_predictive()
+
+## Predicted superclip probabilities before seeing any data
+az.plot_dist(wide_ppc, group='prior', var_names=['p'],
+    sample_dims=['chain', 'draw', '__obs__'])
+```
+
+## Prior Predictive Check With Sensible Priors
+```{python}
+better_priors = {
+    'Intercept': bmb.Prior('Normal', mu=0, sigma=1.5),
+    'straight_100m': bmb.Prior('Normal', mu=0, sigma=1),
+    'lap_10': bmb.Prior('Normal', mu=0, sigma=1),
+    '1|driver': bmb.Prior('Normal', mu=0, sigma=bmb.Prior('HalfNormal', sigma=1)),
+    '1|event': bmb.Prior('Normal', mu=0, sigma=bmb.Prior('HalfNormal', sigma=1))
+}
+
+ba_model.set_priors(priors=better_priors)
+ba_model.build()
+better_ppc = ba_model.prior_predictive()
+
+az.plot_dist(better_ppc, group='prior', var_names=['p'],
+    sample_dims=['chain', 'draw', '__obs__'])
+az.plot_ppc_dist(better_ppc, group='prior_predictive')
+```
