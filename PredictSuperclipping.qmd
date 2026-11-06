@@ -822,3 +822,6 @@ az.plot_dist(better_ppc, group='prior', var_names=['p'],
     sample_dims=['chain', 'draw', '__obs__'])
 az.plot_ppc_dist(better_ppc, group='prior_predictive')
 ```
+
+
+# Milestone 17
