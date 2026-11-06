@@ -787,7 +787,6 @@ ba_model
 
 ## Prior Predictive Check With Wide Priors
 ```{python}
-from bambi import priors
 wide_priors = {
     'Intercept': bmb.Prior('Normal', mu=0, sigma=100),
     'straight_100m': bmb.Prior('Normal', mu=0, sigma=100),
