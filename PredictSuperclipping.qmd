@@ -365,6 +365,7 @@ track_rate = (straights
 - **Races missing:** Bahrain and Saudi Arabia were cancelled in 2026 (Middle East conflict), so they aren't in the data.
 - **Drivers missing:** a few drivers are missing from some races, usually because they didn't start.
 - **Saved file:** `data/processed/straights_2026.parquet`. It also has `event`, `session`, `lap`, and `straight_m` columns so the assumption checks can use it.
+- **Long straights removed:** straights over 2,500 m were dropped in the assumption checks. These are longer than real F1 straights and likely come from gaps in the telemetry.
 
 # Assumption Checks
 
@@ -398,6 +399,29 @@ print("Columns:", straights.columns)
 Validity asks whether the variables measure what we need for our project. Straight length, lap, event, and driver provide information that could help explain superclipping. However, the saved file alone does not establish how the outcome was created or whether it accurately identifies battery-related superclipping.
 
 The following checks examine missing values, binary outcome coding, and straight lengths.
+
+## Long Straight Check
+Some straights are longer than a full lap. This likely comes from gaps in the telemetry, which inflate our distance calculation (speed × time). We look at them, then remove the impossible ones.
+```{python}
+## Look at the longest straights
+long = (straights
+    .filter(pl.col('straight_m') > 1500)
+    .select('event', 'driver', 'lap', 'straight_m', 'entry_speed', 'max_speed', 'superclip')
+    .sort('straight_m', descending = True)
+)
+print('Straights over 1500 m:', long.height)
+print(long.head(20))
+
+print(long.group_by('event')
+    .agg(n = pl.len(), longest = pl.col('straight_m').max())
+    .sort('n', descending = True))
+
+## Drop impossible straights
+MAX_STRAIGHT_M = 2500    ## change if shown a better cutoff
+before = straights.height
+straights = straights.filter(pl.col('straight_m') <= MAX_STRAIGHT_M)
+print('Straights removed:', before - straights.height)
+```
 
 ```{python}
 print("Missing values:")
@@ -767,20 +791,25 @@ Together, these results suggest that track characteristics and differences assoc
 # Milestone 16
 
 ## Setup Model
+We standardize the numeric predictors so priors are on a sensible scale. A value of 0 means average, and 1 means one standard deviation above average.
 ```{python}
 import arviz as az
 import bambi as bmb
 
-## Put lap on similar scale to straigth length (per 10 laps)
-assumption_df['lap_10'] = assumption_df['lap'] / 10
+## Standardize straight length and lap
+for col in ['straight_m', 'lap']:
+    assumption_df[f'{col}_z'] = (
+        (assumption_df[col] - assumption_df[col].mean()) / assumption_df[col].std()
+    )
 
-## Priors only - no fitting yet (smaple is much faster)
-check_df = assumption_df.sample(n = 2000, random_state=42)
+## Priors only - no fitting yet, so a sample is much faster
+check_df = assumption_df.sample(n = 2000, random_state = 42)
 
+## (1|driver) and (1|event) give each driver and track its own adjustment
 ba_model = bmb.Model(
-    'superclip ~ straight_100m + lap_10 + (1|driver) + (1|event)', ## give each driver and track its own adjustment (per-driver, per-track)
-    data=check_df,
-    family='bernoulli'
+    'superclip ~ straight_m_z + lap_z + (1|driver) + (1|event)',
+    data = check_df,
+    family = 'bernoulli'
 )
 ba_model
 ```
@@ -788,41 +817,57 @@ ba_model
 ## Prior Predictive Check With Wide Priors
 ```{python}
 wide_priors = {
-    'Intercept': bmb.Prior('Normal', mu=0, sigma=100),
-    'straight_100m': bmb.Prior('Normal', mu=0, sigma=100),
-    'lap_10': bmb.Prior('Normal', mu=0, sigma=100),
-    "1|driver": bmb.Prior("Normal", mu = 0, sigma = bmb.Prior("HalfNormal", sigma = 100)),
-    "1|event": bmb.Prior("Normal", mu = 0, sigma = bmb.Prior("HalfNormal", sigma = 100))
+    'Intercept': bmb.Prior('Normal', mu = 0, sigma = 100),
+    'straight_m_z': bmb.Prior('Normal', mu = 0, sigma = 100),
+    'lap_z': bmb.Prior('Normal', mu = 0, sigma = 100),
+    '1|driver': bmb.Prior('Normal', mu = 0, sigma = bmb.Prior('HalfNormal', sigma = 100)),
+    '1|event': bmb.Prior('Normal', mu = 0, sigma = bmb.Prior('HalfNormal', sigma = 100))
 }
 
-ba_model.set_priors(priors=wide_priors)
+ba_model.set_priors(priors = wide_priors)
 ba_model.build()
 wide_ppc = ba_model.prior_predictive()
 
 ## Predicted superclip probabilities before seeing any data
-az.plot_dist(wide_ppc, group='prior', var_names=['p'],
-    sample_dims=['chain', 'draw', '__obs__'])
+az.plot_dist(wide_ppc, group = 'prior', var_names = ['p'],
+             sample_dims = ['chain', 'draw', '__obs__'])
 ```
 
 ## Prior Predictive Check With Sensible Priors
 ```{python}
 better_priors = {
-    'Intercept': bmb.Prior('Normal', mu=0, sigma=1.5),
-    'straight_100m': bmb.Prior('Normal', mu=0, sigma=1),
-    'lap_10': bmb.Prior('Normal', mu=0, sigma=1),
-    '1|driver': bmb.Prior('Normal', mu=0, sigma=bmb.Prior('HalfNormal', sigma=1)),
-    '1|event': bmb.Prior('Normal', mu=0, sigma=bmb.Prior('HalfNormal', sigma=1))
+    'Intercept': bmb.Prior('Normal', mu = 0, sigma = 1),
+    'straight_m_z': bmb.Prior('Normal', mu = 0, sigma = 0.75),
+    'lap_z': bmb.Prior('Normal', mu = 0, sigma = 0.75),
+    '1|driver': bmb.Prior('Normal', mu = 0, sigma = bmb.Prior('HalfNormal', sigma = 0.5)),
+    '1|event': bmb.Prior('Normal', mu = 0, sigma = bmb.Prior('HalfNormal', sigma = 1))
 }
 
-ba_model.set_priors(priors=better_priors)
+ba_model.set_priors(priors = better_priors)
 ba_model.build()
 better_ppc = ba_model.prior_predictive()
 
-az.plot_dist(better_ppc, group='prior', var_names=['p'],
-    sample_dims=['chain', 'draw', '__obs__'])
-az.plot_ppc_dist(better_ppc, group='prior_predictive')
+## Predicted superclip probabilities before seeing any data
+az.plot_dist(better_ppc, group = 'prior', var_names = ['p'],
+             sample_dims = ['chain', 'draw', '__obs__'])
 ```
 
+## Share of Straights That Superclip in Each Prior Draw
+```{python}
+share = better_ppc.prior_predictive['superclip'].mean(dim = '__obs__').values.flatten()
+
+plt.figure(figsize = (8, 4))
+plt.hist(share, bins = 30)
+plt.xlabel('Share of straights that superclip (one prior draw)')
+plt.ylabel('Count of draws')
+plt.title('Prior Predictive: Overall Superclip Rate')
+plt.show()
+```
+
+## What Check Shows
+With very wide priors (sigma = 100), the model predicted superclip probabilities near 0 or 1. It expected every straight to always or never superclip, which isn't realistic.
+
+We standardized straight length and lap, then set tighter priors. Tracks get more room to differ (HalfNormal(1)) than drivers (HalfNormal(0.5)), because tracks like Monaco and Monza are very different, while drivers in the same car and conditions differ less. With these priors, predicted probabilities spread across the full range from 0 to 1. The priors allow strong effects while ruling out impossible ones.
 
 # Milestone 17
 
