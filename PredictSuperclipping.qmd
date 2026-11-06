@@ -825,3 +825,147 @@ az.plot_ppc_dist(better_ppc, group='prior_predictive')
 
 
 # Milestone 17
+
+- First we need to create training and testing sets
+```{python}
+import numpy as np
+import pandas as pd
+
+from sklearn.metrics import accuracy_score, confusion_matrix, precision_score, recall_score
+from sklearn.model_selection import StratifiedGroupKFold
+
+model_columns = [
+    "superclip", "straight_100m", "lap_10", "driver", "event", "session"
+]
+
+cv_data = assumption_df[model_columns].dropna().reset_index(drop=True).copy()
+cv_data["superclip"] = cv_data["superclip"].astype(int)
+
+for column in ["driver", "event"]:
+    cv_data[column] = cv_data[column].astype(str)
+
+cv_data["driver_session"] = (
+    cv_data.groupby(["event", "session", "driver"], sort=False).ngroup()
+)
+
+holdout_split = StratifiedGroupKFold(
+    n_splits=5, shuffle=True, random_state=42
+)
+
+train_idx, test_idx = next(holdout_split.split(
+    cv_data,
+    y=cv_data["superclip"],
+    groups=cv_data["driver_session"],
+))
+
+train_data = cv_data.iloc[train_idx].reset_index(drop=True)
+test_data = cv_data.iloc[test_idx].reset_index(drop=True)
+```
+
+- Now we can fit the model from Milestone 16 and predict probablities
+
+```{python}
+from copy import deepcopy
+
+bayes_formula = "superclip ~ straight_100m + lap_10 + (1|driver) + (1|event)"
+
+def fit_and_predict(fit_data, prediction_data, seed):
+    fold_model = bmb.Model(
+        bayes_formula,
+        data=fit_data,
+        family="bernoulli",
+        priors=deepcopy(better_priors),
+    )
+
+    fitted = fold_model.fit(
+        draws=1000,
+        tune=1000,
+        chains=4,
+        cores=1,
+        target_accept=0.90,
+        random_seed=seed,
+    )
+
+    divergences = int(fitted.sample_stats["diverging"].sum().item())
+    print(f"Sampling divergences: {divergences}")
+
+    predicted = fold_model.predict(
+        fitted,
+        data=prediction_data.reset_index(drop=True),
+        kind="response_params",
+        sample_new_groups=True,
+        inplace=False,
+    )
+
+    return predicted.posterior["p"].mean(dim=("chain", "draw")).to_numpy()
+```
+
+- Now for the main step. Tune the cutoff with five-fold cross-vaildation
+
+```{python}
+cutoffs = np.arange(30, 71, 5) / 100
+fold_scores = []
+
+cv = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=43)
+
+for fold, (fit_idx, val_idx) in enumerate(cv.split(
+    train_data,
+    y=train_data["superclip"],
+    groups=train_data["driver_session"],
+), start=1):
+    print(f"Fitting fold {fold} of 5")
+
+    fit_data = train_data.iloc[fit_idx]
+    val_data = train_data.iloc[val_idx]
+    val_prob = fit_and_predict(fit_data, val_data, seed=100 + fold)
+
+    fold_scores.append([
+        accuracy_score(val_data["superclip"], val_prob >= cutoff)
+        for cutoff in cutoffs
+    ])
+
+cv_results = pd.DataFrame({
+    "cutoff": cutoffs,
+    "mean_accuracy": np.mean(fold_scores, axis=0),
+})
+
+# If cutoffs tie, prefer the one closest to 0.50.
+best_row = (
+    cv_results.assign(distance_from_default=(cv_results["cutoff"] - 0.50).abs())
+    .sort_values(
+        ["mean_accuracy", "distance_from_default", "cutoff"],
+        ascending=[False, True, True],
+    )
+    .iloc[0]
+)
+
+best_cutoff = float(best_row["cutoff"])
+
+print(cv_results.round(4).to_string(index=False))
+print(f"\nSelected cutoff: {best_cutoff:.2f}")
+print(f"Mean validation accuracy: {best_row['mean_accuracy']:.3f}")
+```
+
+- After tuning the cutoff, we can evaluate the selected cutoff on the test
+
+```{python}
+test_prob = fit_and_predict(train_data, test_data, seed=200)
+y_test = test_data["superclip"]
+test_results = []
+
+for method, cutoff in [("Default", 0.50), ("Tuned", best_cutoff)]:
+    test_pred = test_prob >= cutoff
+    _, fp, fn, _ = confusion_matrix(y_test, test_pred, labels=[0, 1]).ravel()
+
+    test_results.append({
+        "method": method,
+        "cutoff": cutoff,
+        "accuracy": accuracy_score(y_test, test_pred),
+        "precision": precision_score(y_test, test_pred, zero_division=0),
+        "recall": recall_score(y_test, test_pred, zero_division=0),
+        "false_alarms": fp,
+        "missed_superclips": fn,
+    })
+
+print(pd.DataFrame(test_results).round(3).to_string(index=False))
+```
