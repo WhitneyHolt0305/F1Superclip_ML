@@ -787,7 +787,6 @@ The initial model suggests that longer straights are associated with higher odds
 
 Together, these results suggest that track characteristics and differences associated with drivers, cars, or race strategies may help explain where superclipping occurs. However, the model identifies associations rather than causes: longer straights provide more opportunities to trigger the detection rule, and a speed plateau does not necessarily indicate battery depletion.
 
-
 - These percentages describe changes in odds, not changes in probability. The reference event is Austin and the reference driver is ALB.
 
 - **Straight length:** each additional 100 meters is associated with a 0.795 increase in log-odds, or about 121% higher odds of superclipping, holding other factors constant (95% odds-ratio interval: 2.186–2.243).
