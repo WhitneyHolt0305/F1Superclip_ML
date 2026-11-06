@@ -365,7 +365,7 @@ track_rate = (straights
 - **Races missing:** Bahrain and Saudi Arabia were cancelled in 2026 (Middle East conflict), so they aren't in the data.
 - **Drivers missing:** a few drivers are missing from some races, usually because they didn't start.
 - **Saved file:** `data/processed/straights_2026.parquet`. It also has `event`, `session`, `lap`, and `straight_m` columns so the assumption checks can use it.
-- **Long straights removed:** straights over 2,500 m were dropped in the assumption checks. These are longer than real F1 straights and likely come from gaps in the telemetry.
+- **Long straights removed:** straights over 2,000 m were dropped in the assumption checks. These are longer than real F1 straights and likely come from gaps in the telemetry.
 
 # Assumption Checks
 
