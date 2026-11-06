@@ -417,7 +417,7 @@ print(long.group_by('event')
     .sort('n', descending = True))
 
 ## Drop impossible straights
-MAX_STRAIGHT_M = 2500    ## change if shown a better cutoff
+MAX_STRAIGHT_M = 2000    ## change if shown a better cutoff
 before = straights.height
 straights = straights.filter(pl.col('straight_m') <= MAX_STRAIGHT_M)
 print('Straights removed:', before - straights.height)
