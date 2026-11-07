@@ -881,6 +881,9 @@ We standardized straight length and lap, then set tighter priors. Tracks get mor
 
 - Prepare the data and reserve a test 
 
+This section prepares the data needed to predict whether a straight will show detected superclipping. We keep the outcome, straight length, lap number, driver, event, and session, then remove rows with missing or infinite values. We also check that the outcome contains both 0 and 1 and format the driver and event variables as categories.
+
+We divide the data into approximately 80% training data and 20% testing data. The split keeps all observations from the same driver within the same event and session together, while attempting to preserve the proportion of superclipping outcomes. This reduces information leakage because related observations from a driver’s race cannot appear in both sets. The training data will be used to fit the model and select a prediction cutoff, while the test data will be reserved for the final evaluation.
 ```{python}
 from copy import deepcopy
 from sklearn.metrics import (
@@ -932,6 +935,11 @@ print(f"Test straights: {len(test_data):,}")
 
 - Fit the Bayesian model and return probabilities
 
+This section creates a reusable function that fits our Bayesian logistic regression model and predicts superclipping probabilities for separate observations. The model uses straight length and lap number as predictors and allows drivers and events to have different baseline chances of superclipping. It also uses the priors developed in Milestone 16.
+
+Before fitting the model, the function standardizes straight length and lap number using only the data being used for fitting. It applies those same means and standard deviations to the prediction data, preventing information from the validation or test observations from influencing this step. The model then uses four sampling chains to estimate the posterior distribution and reports sampling divergences as a diagnostic.
+
+For each straight in the prediction data, the function averages the predicted probabilities across posterior draws to return one estimated probability of detected superclipping. These probabilities will be used in the next section to compare prediction cutoffs through cross-validation. This connects the model to our overall goal of predicting which straights are most likely to show superclipping.
 ```{python}
 bayes_formula = "superclip ~ straight_m_z + lap_z + (1|driver) + (1|event)"
 
