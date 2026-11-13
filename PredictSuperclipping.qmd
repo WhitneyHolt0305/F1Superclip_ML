@@ -941,6 +941,7 @@ Before fitting the model, the function standardizes straight length and lap numb
 
 For each straight in the prediction data, the function averages the predicted probabilities across posterior draws to return one estimated probability of detected superclipping. These probabilities will be used in the next section to compare prediction cutoffs through cross-validation. This connects the model to our overall goal of predicting which straights are most likely to show superclipping.
 ```{python}
+#| eval: false
 bayes_formula = "superclip ~ straight_m_z + lap_z + (1|driver) + (1|event)"
 
 
@@ -1006,6 +1007,7 @@ def fit_and_predict(fit_data, prediction_data, seed):
 - Now for the main step. Tune the cutoff with five-fold cross-vaildation
 
 ```{python}
+#| eval: false
 cutoff_percentages = np.arange(30, 71, 5)
 cutoffs = cutoff_percentages / 100
 fold_scores = []
@@ -1051,6 +1053,7 @@ print(f"Mean validation accuracy: {best_row['mean_accuracy']:.3f}")
 - After tuning the cutoff, we can evaluate both cutoffs on the test
 
 ```{python}
+#| eval: false
 test_prob = fit_and_predict(train_data, test_data, seed=200)
 y_test = test_data["superclip"]
 test_results = []
@@ -1075,3 +1078,509 @@ print(pd.DataFrame(test_results).round(3).to_string(index=False))
 ```
 
 We tested nine probability cutoffs using five-fold cross-validation. Each fold trained the model on four partitions and validated it on the fifth, keeping straights from the same driver-session together. We selected the cutoff with the highest average validation accuracy. Then we refitted the model on all training data and compared that cutoff with 0.50 on the reserved test set. We reported accuracy along with false alarms and missed superclips to show the effect of changing the cutoff.
+
+# Milestone 18: Start applying penalized regression to your project work and compare with existing model runs.
+
+- Imports and fixed settings:
+```{python}
+#| warning: false
+
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    confusion_matrix,
+)
+
+# Selected previously in Milestone 17
+cutoff_prob = 0.45
+
+numeric_predictors = ["straight_m", "lap"]
+categorical_predictors = ["driver", "event"]
+predictors = numeric_predictors + categorical_predictors
+
+print(f"Fixed prediction cutoff: {cutoff_prob:.2f}")
+```
+
+- Now we can create the shared fitting/validation split
+    - Split the existing train_data again, while leaving test_data reserved.
+
+```{python}
+#| warning: false
+
+development_data = train_data.reset_index(drop=True).copy()
+reserved_test_data = test_data.reset_index(drop=True).copy()
+
+validation_splitter = StratifiedGroupKFold(
+    n_splits=5,
+    shuffle=True,
+    random_state=44
+)
+
+fit_idx, validation_idx = next(
+    validation_splitter.split(
+        development_data,
+        y=development_data["superclip"],
+        groups=development_data["driver_session"]
+    )
+)
+
+fit_data = development_data.iloc[fit_idx].reset_index(drop=True)
+validation_data = (
+    development_data.iloc[validation_idx].reset_index(drop=True)
+)
+
+# Related driver-session observations must stay together
+fit_groups = set(fit_data["driver_session"])
+validation_groups = set(validation_data["driver_session"])
+test_groups = set(reserved_test_data["driver_session"])
+
+assert fit_groups.isdisjoint(validation_groups)
+assert fit_groups.isdisjoint(test_groups)
+assert validation_groups.isdisjoint(test_groups)
+
+split_summary = pd.DataFrame([
+    {
+        "Set": name,
+        "Rows": len(data),
+        "Groups": data["driver_session"].nunique(),
+        "Superclip_rate": data["superclip"].mean()
+    }
+    for name, data in [
+        ("Fitting", fit_data),
+        ("Validation", validation_data),
+        ("Test", reserved_test_data)
+    ]
+])
+
+print(split_summary.round(4).to_string(index=False))
+```
+
+- Create the shared fitting/validation split
+    - Split the existing train_data again, while leaving test_data reserved.
+
+```{python}
+#| warning: false
+
+development_data = train_data.reset_index(drop=True).copy()
+reserved_test_data = test_data.reset_index(drop=True).copy()
+
+validation_splitter = StratifiedGroupKFold(
+    n_splits=5,
+    shuffle=True,
+    random_state=44
+)
+
+fit_idx, validation_idx = next(
+    validation_splitter.split(
+        development_data,
+        y=development_data["superclip"],
+        groups=development_data["driver_session"]
+    )
+)
+
+fit_data = development_data.iloc[fit_idx].reset_index(drop=True)
+validation_data = (
+    development_data.iloc[validation_idx].reset_index(drop=True)
+)
+
+# Related driver-session observations must stay together
+fit_groups = set(fit_data["driver_session"])
+validation_groups = set(validation_data["driver_session"])
+test_groups = set(reserved_test_data["driver_session"])
+
+assert fit_groups.isdisjoint(validation_groups)
+assert fit_groups.isdisjoint(test_groups)
+assert validation_groups.isdisjoint(test_groups)
+
+split_summary = pd.DataFrame([
+    {
+        "Set": name,
+        "Rows": len(data),
+        "Groups": data["driver_session"].nunique(),
+        "Superclip_rate": data["superclip"].mean()
+    }
+    for name, data in [
+        ("Fitting", fit_data),
+        ("Validation", validation_data),
+        ("Test", reserved_test_data)
+    ]
+])
+
+print(split_summary.round(4).to_string(index=False))
+```
+
+- Purpose of the code above is to create one common validation set for ridge, LASSO, and elastic net.
+
+- For the next step, we can prepare inputs and share cross-validation folds
+
+```{python}
+#| warning: false
+
+X_fit = fit_data[predictors].copy()
+y_fit = fit_data["superclip"].astype(int).to_numpy()
+groups_fit = fit_data["driver_session"].to_numpy()
+
+X_validation = validation_data[predictors].copy()
+y_validation = validation_data["superclip"].astype(int).to_numpy()
+
+for column in categorical_predictors:
+    X_fit[column] = X_fit[column].astype(str)
+    X_validation[column] = X_validation[column].astype(str)
+
+cv_splitter = StratifiedGroupKFold(
+    n_splits=5,
+    shuffle=True,
+    random_state=45
+)
+
+cv_splits = list(
+    cv_splitter.split(
+        X_fit,
+        y=y_fit,
+        groups=groups_fit
+    )
+)
+
+for fold, (training_idx, heldout_idx) in enumerate(cv_splits, start=1):
+    assert set(groups_fit[training_idx]).isdisjoint(
+        set(groups_fit[heldout_idx])
+    )
+
+    if (
+        len(np.unique(y_fit[training_idx])) != 2
+        or len(np.unique(y_fit[heldout_idx])) != 2
+    ):
+        raise ValueError(f"Fold {fold} needs both outcome classes.")
+
+print("Five grouped CV folds prepared.")
+```
+
+- Purpose of that code is to fix the five folds so your teammates can use exactly the same assignments.
+
+- Next, lets define shared preprocessing and scoring:
+
+```{python}
+#| warning: false
+
+def make_f1_pipeline(classifier):
+    encoder = ColumnTransformer(
+        transformers=[
+            ("numeric", "passthrough", numeric_predictors),
+            (
+                "categorical",
+                OneHotEncoder(
+                    drop="first",
+                    handle_unknown="ignore",
+                    sparse_output=False
+                ),
+                categorical_predictors
+            )
+        ],
+        remainder="drop",
+        verbose_feature_names_out=False
+    )
+
+    return Pipeline([
+        ("encoding", encoder),
+        ("feature_engineering", StandardScaler()),
+        ("classification", classifier)
+    ])
+
+
+def cutoff_accuracy(estimator, X_valid, y_valid):
+    probabilities = estimator.predict_proba(X_valid)[:, 1]
+    predictions = (probabilities >= cutoff_prob).astype(int)
+
+    return accuracy_score(y_valid, predictions)
+```
+
+What does the pipeline above do?
+  - Keeps straight length and lap.
+  - Converts driver and event into indicator columns.
+  - Drops one reference category per categorical variable.
+  - Standardizes the complete predictor matrix, following your leads exercises.
+  - Fits logistic regression.
+
+- Check for unseen categories
+```{python}
+#| warning: false
+
+datasets_to_check = [
+    ("Validation", X_fit, X_validation)
+]
+
+for fold, (training_idx, heldout_idx) in enumerate(cv_splits, start=1):
+    datasets_to_check.append((
+        f"CV fold {fold}",
+        X_fit.iloc[training_idx],
+        X_fit.iloc[heldout_idx]
+    ))
+
+unseen_found = False
+
+for name, fitting_rows, prediction_rows in datasets_to_check:
+    for column in categorical_predictors:
+        unseen = sorted(
+            set(prediction_rows[column]) - set(fitting_rows[column])
+        )
+
+        if unseen:
+            unseen_found = True
+            print(f"{name}: unseen {column} levels = {unseen}")
+
+if not unseen_found:
+    print("All prediction categories are represented in their fitting data.")
+```
+
+# Now, let's tune Ridge Regression
+
+```{python}
+#| warning: false
+
+C_values = np.logspace(-4, 4, 20)
+
+ridge_pipeline = make_f1_pipeline(
+    LogisticRegression(
+        l1_ratio=0,
+        solver="lbfgs",
+        max_iter=10000,
+        tol=1e-6
+    )
+)
+
+ridge_search = GridSearchCV(
+    estimator=ridge_pipeline,
+    param_grid={"classification__C": C_values},
+    scoring=cutoff_accuracy,
+    cv=cv_splits,
+    n_jobs=1,
+    refit=True,
+    error_score="raise"
+)
+
+start = time.perf_counter()
+ridge_search.fit(X_fit, y_fit)
+ridge_search_seconds = time.perf_counter() - start
+
+ridge_best = ridge_search.best_estimator_
+ridge_best_C = float(
+    ridge_search.best_params_["classification__C"]
+)
+
+print(f"Selected C: {ridge_best_C:.6g}")
+print(f"Mean CV accuracy: {ridge_search.best_score_:.4f}")
+print(f"Search time: {ridge_search_seconds:.1f} seconds")
+
+if ridge_best_C in (C_values[0], C_values[-1]):
+    print("Best C is at a boundary; extend the grid before finalizing.")
+```
+
+- Display tuning results
+
+```{python}
+#| warning: false
+
+ridge_cv_results = pd.DataFrame({
+    "C": [
+        float(value)
+        for value in ridge_search.cv_results_["param_classification__C"]
+    ],
+    "Mean_CV_accuracy": ridge_search.cv_results_["mean_test_score"],
+    "SD_across_folds": ridge_search.cv_results_["std_test_score"],
+    "Rank": ridge_search.cv_results_["rank_test_score"]
+}).sort_values(["Rank", "C"])
+
+print(ridge_cv_results.head(5).round(6).to_string(index=False))
+```
+
+- Fit the non-regularized benchmark
+
+```{python}
+#| warning: false
+
+baseline_model = make_f1_pipeline(
+    LogisticRegression(
+        C=np.inf,
+        l1_ratio=0,
+        solver="lbfgs",
+        max_iter=10000,
+        tol=1e-6
+    )
+)
+
+start = time.perf_counter()
+baseline_model.fit(X_fit, y_fit)
+baseline_fit_seconds = time.perf_counter() - start
+
+print(f"Baseline fit time: {baseline_fit_seconds:.1f} seconds")
+```
+
+- Compare validation performance:
+
+```{python}
+#| warning: false
+
+def evaluate_probabilities(name, y_true, probabilities):
+    predictions = (probabilities >= cutoff_prob).astype(int)
+
+    tn, fp, fn, tp = confusion_matrix(
+        y_true,
+        predictions,
+        labels=[0, 1]
+    ).ravel()
+
+    return {
+        "Model": name,
+        "Cutoff": cutoff_prob,
+        "Validation_accuracy": accuracy_score(y_true, predictions),
+        "Precision": precision_score(
+            y_true, predictions, zero_division=0
+        ),
+        "Recall": recall_score(
+            y_true, predictions, zero_division=0
+        ),
+        "False_alarms": int(fp),
+        "Missed_superclips": int(fn)
+    }
+
+
+ridge_validation_prob = ridge_best.predict_proba(
+    X_validation
+)[:, 1]
+
+baseline_validation_prob = baseline_model.predict_proba(
+    X_validation
+)[:, 1]
+
+part1_comparison = pd.DataFrame([
+    evaluate_probabilities(
+        "Non-regularized logistic",
+        y_validation,
+        baseline_validation_prob
+    ),
+    evaluate_probabilities(
+        "Ridge",
+        y_validation,
+        ridge_validation_prob
+    )
+])
+
+print(part1_comparison.round(4).to_string(index=False))
+
+accuracy_difference = (
+    part1_comparison.loc[1, "Validation_accuracy"]
+    - part1_comparison.loc[0, "Validation_accuracy"]
+)
+
+print(
+    f"\nRidge minus baseline accuracy: "
+    f"{100 * accuracy_difference:+.2f} percentage points"
+)
+```
+
+- Compare coefficients on the original scale:
+
+```{python}
+#| warning: false
+
+def coefficient_table(fitted_pipeline, model_name):
+    feature_names = (
+        fitted_pipeline.named_steps["encoding"]
+        .get_feature_names_out()
+    )
+
+    scaler = fitted_pipeline.named_steps["feature_engineering"]
+    classifier = fitted_pipeline.named_steps["classification"]
+
+    standardized_slopes = classifier.coef_.ravel()
+    slopes = standardized_slopes / scaler.scale_
+
+    intercept = (
+        classifier.intercept_[0]
+        - np.sum(
+            standardized_slopes * scaler.mean_ / scaler.scale_
+        )
+    )
+
+    return pd.DataFrame({
+        "Term": ["Intercept"] + list(feature_names),
+        model_name: np.concatenate(([intercept], slopes))
+    })
+
+
+coefficient_comparison = coefficient_table(
+    baseline_model, "Baseline"
+).merge(
+    coefficient_table(ridge_best, "Ridge"),
+    on="Term",
+    validate="one_to_one"
+)
+
+print(coefficient_comparison.round(5).to_string(index=False))
+
+# Straight-length effect per 100 meters; lap effect per lap
+numeric_effects = coefficient_comparison[
+    coefficient_comparison["Term"].isin(numeric_predictors)
+].copy()
+
+numeric_effects["Increment"] = numeric_effects["Term"].map({
+    "straight_m": 100,
+    "lap": 1
+})
+
+for model_name in ["Baseline", "Ridge"]:
+    numeric_effects[f"{model_name}_OR"] = np.exp(
+        numeric_effects[model_name] * numeric_effects["Increment"]
+    )
+
+print("\nNumeric effects:")
+print(
+    numeric_effects[
+        ["Term", "Increment", "Baseline_OR", "Ridge_OR"]
+    ].round(4).to_string(index=False)
+)
+
+# Identify the references for interpreting category coefficients
+encoder = (
+    ridge_best.named_steps["encoding"]
+    .named_transformers_["categorical"]
+)
+
+print("\nReference categories:")
+for column, levels, dropped_index in zip(
+    categorical_predictors,
+    encoder.categories_,
+    encoder.drop_idx_
+):
+    print(f"{column}: {levels[int(dropped_index)]}")
+```
+
+# Results and Summary: 
+
+Model setup and selection 
+- Ridge logistic regression that is predicting detected superclipping from straight length, lap, driver, and event.
+- Five-fold grouped cross-validation, keeping driver-session observations together.
+- Fixed cutoff of 0.45 and selected C = 11.2884, which produced little shrinkage.
+
+Predictive performance and the main finding
+- Both the non-regularized logistic regression and the Ridge regression achieved approximately 82.3% validation accuracy.
+- The Ridge regression made only one fewer error, nearly negligible, with no meaningful predictive improvement.
+- Precision was approximately 78.9%, and recall was 74.2%.
+
+Interpretation and conclusion:
+- The coefficients changed very little using the Ridge regression model.
+- Important limitation: some held-out drivers were unseen during fitting and received the reference-driver adjustment.
+- Each additional 100 meters is associated with about 115% higher odds of detected superclipping (holding other predictors constant).
+- Each additional lap was associated with approximately 0.65% higher odds.
+
+Overall, the Ridge regression model essentially acts the same as the baseline model (non-regularized logistic regression). There is little reason to use Ridge over the baseline.
+
+LASSO and elastic net will be evaluated on the same validation set before the group selects its final model.
+
+Jackson/Whitney here: 
