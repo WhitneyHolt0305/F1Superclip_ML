@@ -2187,7 +2187,6 @@ print(elastic_cv_results.head(5).round(6).to_string(index=False))
 
 ## Evaluate Elastic Net on Validation
 ```{python}
-from numpy import count_nonzero
 ZERO_TOL = 1e-8
 
 def count_nonzero_slopes(fitted_pipeline):
@@ -2475,7 +2474,7 @@ RUN_BOOTSTRAP = True
 if RUN_BOOTSTRAP:
     # Choose the actual winner after comparing validation performance.
     selected_pipeline = winner_pipeline
-    
+
     # Other possibilities:
     # selected_pipeline = ridge_best
     # selected_pipeline = elastic_best
