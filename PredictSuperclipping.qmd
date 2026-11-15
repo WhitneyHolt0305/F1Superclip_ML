@@ -2222,4 +2222,360 @@ which limits interpretation of their predictions.
 The grouped-bootstrap procedure is prepared. We will run it
 after comparing elastic net and selecting the final model.
 
-Whitney here:
+# Penalized Regression | Elastic Net and Overall Comparison
+
+## Tune Elastic Net
+```{python}
+import time
+import warnings
+from pathlib import Path
+
+from sklearn.base import clone
+from sklearn.exceptions import ConvergenceWarning
+
+l1_ratio_values = [0.1, 0.25, 0.5, 0.75, 0.9]
+
+elastic_pipeline = make_f1_pipeline(
+    LogisticRegression(
+        l1_ratio=0.5,
+        solver='saga',
+        max_iter=50000,
+        tol=1e-6,
+        random_state=47
+    )
+)
+
+elastic_search = GridSearchCV(
+    estimator=elastic_pipeline,
+    param_grid={
+        'classification__C': C_values,
+        'classification__l1_ratio': l1_ratio_values
+    },
+    scoring=cutoff_accuracy,
+    cv=cv_splits,
+    n_jobs=1,
+    refit=True,
+    error_score='raise'
+)
+
+start = time.perf_counter()
+
+## Record convergence warnings instead of stopping the render
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter('always', ConvergenceWarning)
+    elastic_search.fit(X_fit, y_fit)
+
+elastic_search_seconds = time.perf_counter() - start
+
+n_convergence_warnings = sum(
+    issubclass(w.category, ConvergenceWarning) for w in caught
+)
+
+elastic_best = elastic_search.best_estimator_
+elastic_best_C = float(elastic_search.best_params_['classification__C'])
+elastic_best_l1 = float(
+    elastic_search.best_params_['classification__l1_ratio']
+)
+
+print(f"Selected C: {elastic_best_C:.6g}")
+print(f"Selected l1_ratio: {elastic_best_l1}")
+print(f"Mean CV accuracy: {elastic_search.best_score_:.4f}")
+print(f"Search and refit time: {elastic_search_seconds:.1f} seconds")
+print(f"Convergence warnings: {n_convergence_warnings}")
+
+if elastic_best_C in (C_values[0], C_values[-1]):
+    print('Best C is at a grid boundary; consider extending the grid.')
+
+if elastic_best_l1 in (l1_ratio_values[0], l1_ratio_values[-1]):
+    print('Best l1_ratio is at the edge of the searched mixtures.')
+
+elastic_cv_results = pd.DataFrame({
+    "C": [float(v) for v in
+          elastic_search.cv_results_["param_classification__C"]],
+    "l1_ratio": [float(v) for v in
+                 elastic_search.cv_results_["param_classification__l1_ratio"]],
+    "Mean_CV_accuracy": elastic_search.cv_results_["mean_test_score"],
+    "SD_across_folds": elastic_search.cv_results_["std_test_score"],
+    "Rank": elastic_search.cv_results_["rank_test_score"]
+
+}).sort_values(["Rank", "C", "l1_ratio"])
+
+print(elastic_cv_results.head(5).round(6).to_string(index=False))
+```
+
+## Evaluate Elastic Net on Validation
+```{python}
+from numpy import count_nonzero
+ZERO_TOL = 1e-8
+
+def count_nonzero_slopes(fitted_pipeline):
+    slopes = fitted_pipeline.named_steps['classification'].coef_.ravel()
+    return int((np.abs(slopes) > ZERO_TOL).sum()), len(slopes)
+
+elastic_validation_prob = elastic_best.predict_proba(X_validation)[:, 1]
+
+elastic_nonzero, total_slopes = count_nonzero_slopes(elastic_best)
+
+part3_comparison = pd.concat([
+    part2_comparison,
+    pd.DataFrame([
+        evaluate_probabilities(
+            "Elastic net", y_validation, elastic_validation_prob
+        )
+    ])
+], ignore_index=True)
+
+print(part3_comparison.round(4).to_string(index=False))
+print(f"\nElastic net nonzero slopes: {elastic_nonzero} of {total_slopes}")
+```
+
+## More Like Ridge or LASSO?
+```{python}
+all_coefficients = lasso_coefficient_comparison.merge(
+    coefficient_table(elastic_best, "Elastic_net"),
+    on="Term",
+    validate="one_to_one"
+)
+
+## Same scale as before - straight length per 100 meters
+all_coefficients["Elastic_net"] *= all_coefficients["Term"].map({
+    "straight_m": 100, "lap": 1
+}).fillna(1)
+
+slopes_only = all_coefficients[all_coefficients['Term'] != 'Intercept']
+
+diff_from_ridge = np.mean(
+    np.abs(slopes_only["Elastic_net"] - slopes_only["Ridge"])
+)
+diff_from_lasso = np.mean(
+    np.abs(slopes_only["Elastic_net"] - slopes_only["LASSO"])
+)
+
+print(all_coefficients.round(5).to_string(index=False))
+print(f"\nAverage difference from ridge: {diff_from_ridge:.5f}")
+print(f"Average difference from LASSO: {diff_from_lasso:.5f}")
+
+closer_to = "ridge" if diff_from_ridge < diff_from_lasso else "LASSO"
+print(f"Elastic net coefficients are closer to {closer_to}.")
+```
+
+## Bayesian Benchmark (slow first time)
+```{python}
+bayes_formula = 'superclip ~ straight_m_z + lap_z + (1|driver) + (1|event)'
+bayes_cache = Path('data') / 'bayes_fit_validation_split.nc'
+
+## A simple ID for this split - so we can never reuse a fit from other rows
+split_key = f"{len(fit_data)}-{int(fit_data['driver_session'].sum())}"
+
+def add_z_scores(fit_rows, prediction_rows):
+    fit_rows = fit_rows.reset_index(drop=True).copy()
+    prediction_rows = prediction_rows.reset_index(drop=True).copy()
+
+    ## Scale using the fitting rows slopes_only
+    means = fit_rows[numeric_columns].mean()
+    stds = fit_rows[numeric_columns].std()
+
+    for col in numeric_columns:
+        fit_rows[f'{col}_z'] = (fit_rows[col] - means[col]) /stds[col]
+        prediction_rows[f'{col}_z'] = (
+            (prediction_rows[col] - means[col]) /stds[col]
+        )
+    return fit_rows, prediction_rows
+
+bayes_fit_rows, bayes_validation_rows = add_z_scores(
+    fit_data, validation_data
+)
+
+bayes_model = bmb.Model(
+    bayes_formula,
+    data=bayes_fit_rows,
+    family='bernoulli',
+    priors=deepcopy(better_priors),
+)
+
+bayes_fitted = None
+
+if bayes_cache.exists():
+    cached = az.from_netcdf(bayes_cache)
+    if cached.posterior.attrs.get("split_key") == split_key:
+        bayes_fitted = cached
+        bayes_fit_seconds = float(cached.posterior.attrs["fit_seconds"])
+        bayes_model.build()
+        print("Loaded saved Bayesian fit for this split.")
+
+if bayes_fitted is None:
+    start = time.perf_counter()
+    bayes_fitted = bayes_model.fit(
+        draws=1000,
+        tune=1000,
+        chains=4,
+        cores=1,
+        target_accept=0.90,
+        random_seed=500,
+    )
+    bayes_fit_seconds = time.perf_counter() - start
+
+    bayes_fitted.posterior.attrs["split_key"] = split_key
+    bayes_fitted.posterior.attrs["fit_seconds"] = bayes_fit_seconds
+    bayes_cache.parent.mkdir(parents=True, exist_ok=True)
+    bayes_fitted.to_netcdf(bayes_cache)
+
+## Predict the validation rows
+bayes_predicted = bayes_model.predict(
+    bayes_fitted,
+    data=bayes_validation_rows,
+    kind="response_params",
+    sample_new_groups=True,
+    inplace=False,
+)
+
+bayes_validation_prob = (
+    bayes_predicted.posterior['p'].mean(dim=('chain', 'draw')).to_numpy()
+)
+
+## Sampling diagnostics
+bayes_divergences = int(bayes_fitted.sample_stats["diverging"].sum().item())
+bayes_diag = az.summary(bayes_fitted, kind="diagnostics")
+
+print(f"Fit time: {bayes_fit_seconds:.1f} seconds")
+print(f"Divergences: {bayes_divergences}")
+print(f"Largest R-hat: {bayes_diag['r_hat'].max():.3f}  (want below 1.01)")
+print(f"Smallest bulk ESS: {bayes_diag['ess_bulk'].min():.0f}  (want above 400)")
+print(f"Smallest tail ESS: {bayes_diag['ess_tail'].min():.0f}  (want above 400)")
+
+print("\nMain parameters:")
+print(az.summary(
+    bayes_fitted,
+    var_names=["Intercept", "straight_m_z", "lap_z",
+               "1|driver_sigma", "1|event_sigma"]
+).round(3))
+```
+
+## Combined Table
+```{python}
+def nonzero_label(fitted_pipeline):
+    kept, total = count_nonzero_slopes(fitted_pipeline)
+    return f'{kept} of {total}'
+
+combined_table = pd.DataFrame([
+    evaluate_probabilities("Non-regularized logistic", y_validation,
+                           baseline_validation_prob),
+    evaluate_probabilities("Ridge", y_validation, ridge_validation_prob),
+    evaluate_probabilities("LASSO", y_validation, lasso_validation_prob),
+    evaluate_probabilities("Elastic net", y_validation,
+                           elastic_validation_prob),
+    evaluate_probabilities("Bayesian hierarchical", y_validation,
+                           bayes_validation_prob),
+])
+
+combined_table.insert(1, "Settings", [
+    "None",
+    f"C = {ridge_best_C:.4g}",
+    f"C = {lasso_best_C:.4g}",
+    f"C = {elastic_best_C:.4g}, l1_ratio = {elastic_best_l1}",
+    "better_priors (Milestone 16)",
+])
+
+combined_table["Fit_or_search_seconds"] = [
+    baseline_fit_seconds,
+    ridge_search_seconds,
+    lasso_search_seconds,
+    elastic_search_seconds,
+    bayes_fit_seconds,
+]
+
+combined_table["Time_type"] = [
+    "One fit", "CV search + refit", "CV search + refit",
+    "CV search + refit", "One MCMC fit",
+]
+
+combined_table["Nonzero_slopes"] = [
+    nonzero_label(baseline_model),
+    nonzero_label(ridge_best),
+    nonzero_label(lasso_best),
+    nonzero_label(elastic_best),
+    "Not directly comparable",
+]
+
+combined_table = combined_table.drop(columns="Cutoff")
+print(combined_table.round(4).to_string(index=False))
+```
+
+## Pick The Winner
+```{python}
+penalized_pipelines = {
+    "Ridge": ridge_best,
+    "LASSO": lasso_best,
+    "Elastic net": elastic_best,
+}
+
+penalized_rows = combined_table[
+    combined_table['Model'].isin(penalized_pipelines)
+].copy()
+
+best_accuracy = penalized_rows['Validation_accuracy'].max()
+tied = penalized_rows[
+    np.isclose(penalized_rows['Validation_accuracy'], best_accuracy)
+]
+
+if len(tied) > 1:
+    print("Tie on validation accuracy between:", ", ".join(tied["Model"]))
+    tied = tied.assign(
+        kept=[count_nonzero_slopes(penalized_pipelines[m])[0]
+              for m in tied["Model"]]
+    ).sort_values("kept")
+    print("Tie broken by choosing the model with fewer nonzero slopes.")
+
+winner_name = tied['Model'].iloc[0]
+winner_pipeline = penalized_pipelines[winner_name]
+
+print(f"Penalized winner: {winner_name}")
+print(f"Validation accuracy: {best_accuracy:.4f}")
+```
+
+## Final Test Set Check
+```{python}
+X_dev = development_data[predictors].copy()
+y_dev = development_data["superclip"].astype(int).to_numpy()
+X_test = reserved_test_data[predictors].copy()
+y_test = reserved_test_data["superclip"].astype(int).to_numpy()
+
+for column in categorical_predictors:
+    X_dev[column] = X_dev[column].astype(str)
+    X_test[column] = X_test[column].astype(str)
+
+## Report test categories never seen in training
+for column in categorical_predictors:
+    unseen = sorted(set(X_test[column]) - set(X_dev[column]))
+    if unseen:
+        print(f"Unseen {column} levels in test: {unseen}")
+
+test_models = {
+    "Non-regularized logistic": baseline_model,
+    **penalized_pipelines,
+}
+
+test_rows = []
+
+for name, pipeline in test_models.items():
+    final_model = clone(pipeline) ## keeps chosen C and l1_ratio
+
+    start = time.perf_counter()
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', ConvergenceWarning)
+        final_model.fit(X_dev, y_dev)
+    final_fit_seconds = time.perf_counter() - start
+
+    result = evaluate_probabilities(
+        name, y_test, final_model.predict_proba(X_test)[:, 1]
+    )
+    result["Test_accuracy"] = result.pop("Validation_accuracy")
+    result["Final_fit_seconds"] = final_fit_seconds
+    result["Role"] = "Winner" if name == winner_name else "Descriptive"
+    test_rows.append(result)
+
+    if name == winner_name:
+        winner_final_model = final_model
+test_table = pd.DataFrame(test_rows).drop(columns='Cutoff')
+print(test_table.round(4).to_string(index=False))
+```
