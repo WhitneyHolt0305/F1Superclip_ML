@@ -2222,4 +2222,4 @@ which limits interpretation of their predictions.
 The grouped-bootstrap procedure is prepared. We will run it
 after comparing elastic net and selecting the final model.
 
-Whitney here: 
+Whitney here:
