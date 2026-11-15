@@ -2062,124 +2062,6 @@ def grouped_bootstrap(
 
 If a category or its reference is missing from a bootstrap resample, its contrast cannot be estimated from that resample. We preserve the categorical columns but mark the affected estimates missing. The interval table reports the number of valid resamples and leaves incomplete intervals blank for investigation.
 
-## Run After Selecting the Winning Model
-
-Leave the following switch set to False until the group has compared all three penalized models. After selecting the winner, set it to True and choose the corresponding pipeline.
-
-The bootstrap uses the complete training data and leaves the reserved test set untouched.
-
-```{python}
-RUN_BOOTSTRAP = False
-
-if RUN_BOOTSTRAP:
-    # Choose the actual winner after comparing validation performance.
-    selected_pipeline = lasso_best
-
-    # Other possibilities:
-    # selected_pipeline = ridge_best
-    # selected_pipeline = elastic_best
-    # Use Member 3's actual variable name for the elastic-net pipeline.
-
-    interval_table, bootstrap_draws, final_models = (
-        grouped_bootstrap(
-            selected_pipeline=selected_pipeline,
-            training_data=development_data,
-            baseline_pipeline=baseline_model,
-            n_samples=100,
-            seed=300
-        )
-    )
-
-    print("Grouped-bootstrap interval table:")
-    print(interval_table.round(5).to_string(index=False))
-
-    interval_comparison = interval_table.pivot(
-        index="Term",
-        columns="Model",
-        values=[
-            "Estimate",
-            "CI_lower",
-            "CI_upper",
-            "Valid_resamples"
-        ]
-    )
-
-    print("\nWinner versus non-regularized benchmark:")
-    print(interval_comparison.round(5).to_string())
-
-    # Matched ordinary MLE intervals for comparison.
-    # These intervals do not account for clustering.
-    base = final_models["Nonregularized"]
-
-    ordinary_X = development_data[predictors].copy()
-
-    for column in categorical_predictors:
-        ordinary_X[column] = ordinary_X[column].astype(str)
-
-    raw_design = (
-        base.named_steps["encoding"].transform(ordinary_X)
-    )
-
-    raw_names = list(
-        base.named_steps["encoding"].get_feature_names_out()
-    )
-
-    # Match the bootstrap's 100-meter straight-length scale.
-    raw_design[:, raw_names.index("straight_m")] /= 100
-
-    raw_design = sm.add_constant(
-        raw_design, has_constant="add"
-    )
-
-    if np.linalg.matrix_rank(raw_design) != raw_design.shape[1]:
-        print(
-            "Ordinary intervals skipped: "
-            "the model matrix is rank deficient."
-        )
-    else:
-        ordinary_fit = sm.GLM(
-            development_data["superclip"].to_numpy(),
-            raw_design,
-            family=sm.families.Binomial()
-        ).fit()
-
-        ordinary_ci = np.asarray(ordinary_fit.conf_int())
-
-        ordinary_table = pd.DataFrame({
-            "Term": ["Intercept"] + raw_names,
-            "Ordinary_MLE": np.asarray(ordinary_fit.params),
-            "Ordinary_lower": ordinary_ci[:, 0],
-            "Ordinary_upper": ordinary_ci[:, 1]
-        })
-
-        winner_interval_comparison = interval_table[
-            interval_table["Model"].eq("Winner")
-        ].merge(
-            ordinary_table,
-            on="Term",
-            validate="one_to_one"
-        )
-
-        print(
-            "\nWinner bootstrap versus ordinary "
-            "non-regularized intervals:"
-        )
-        print(
-            winner_interval_comparison.round(5)
-            .to_string(index=False)
-        )
-
-        print(
-            "Ordinary MLE converged:",
-            ordinary_fit.converged
-        )
-
-else:
-    print(
-        "Grouped bootstrap prepared. "
-        "Run after the group selects its winning model."
-    )
-```
 
 ## Interpretation and Limitations
 
@@ -2578,4 +2460,124 @@ for name, pipeline in test_models.items():
         winner_final_model = final_model
 test_table = pd.DataFrame(test_rows).drop(columns='Cutoff')
 print(test_table.round(4).to_string(index=False))
+```
+
+
+## Run After Selecting the Winning Model
+
+Leave the following switch set to False until the group has compared all three penalized models. After selecting the winner, set it to True and choose the corresponding pipeline.
+
+The bootstrap uses the complete training data and leaves the reserved test set untouched.
+
+```{python}
+RUN_BOOTSTRAP = True
+
+if RUN_BOOTSTRAP:
+    # Choose the actual winner after comparing validation performance.
+    selected_pipeline = winner_pipeline
+    
+    # Other possibilities:
+    # selected_pipeline = ridge_best
+    # selected_pipeline = elastic_best
+    # Use Member 3's actual variable name for the elastic-net pipeline.
+
+    interval_table, bootstrap_draws, final_models = (
+        grouped_bootstrap(
+            selected_pipeline=selected_pipeline,
+            training_data=development_data,
+            baseline_pipeline=baseline_model,
+            n_samples=100,
+            seed=300
+        )
+    )
+
+    print("Grouped-bootstrap interval table:")
+    print(interval_table.round(5).to_string(index=False))
+
+    interval_comparison = interval_table.pivot(
+        index="Term",
+        columns="Model",
+        values=[
+            "Estimate",
+            "CI_lower",
+            "CI_upper",
+            "Valid_resamples"
+        ]
+    )
+
+    print("\nWinner versus non-regularized benchmark:")
+    print(interval_comparison.round(5).to_string())
+
+    # Matched ordinary MLE intervals for comparison.
+    # These intervals do not account for clustering.
+    base = final_models["Nonregularized"]
+
+    ordinary_X = development_data[predictors].copy()
+
+    for column in categorical_predictors:
+        ordinary_X[column] = ordinary_X[column].astype(str)
+
+    raw_design = (
+        base.named_steps["encoding"].transform(ordinary_X)
+    )
+
+    raw_names = list(
+        base.named_steps["encoding"].get_feature_names_out()
+    )
+
+    # Match the bootstrap's 100-meter straight-length scale.
+    raw_design[:, raw_names.index("straight_m")] /= 100
+
+    raw_design = sm.add_constant(
+        raw_design, has_constant="add"
+    )
+
+    if np.linalg.matrix_rank(raw_design) != raw_design.shape[1]:
+        print(
+            "Ordinary intervals skipped: "
+            "the model matrix is rank deficient."
+        )
+    else:
+        ordinary_fit = sm.GLM(
+            development_data["superclip"].to_numpy(),
+            raw_design,
+            family=sm.families.Binomial()
+        ).fit()
+
+        ordinary_ci = np.asarray(ordinary_fit.conf_int())
+
+        ordinary_table = pd.DataFrame({
+            "Term": ["Intercept"] + raw_names,
+            "Ordinary_MLE": np.asarray(ordinary_fit.params),
+            "Ordinary_lower": ordinary_ci[:, 0],
+            "Ordinary_upper": ordinary_ci[:, 1]
+        })
+
+        winner_interval_comparison = interval_table[
+            interval_table["Model"].eq("Winner")
+        ].merge(
+            ordinary_table,
+            on="Term",
+            validate="one_to_one"
+        )
+
+        print(
+            "\nWinner bootstrap versus ordinary "
+            "non-regularized intervals:"
+        )
+        print(
+            winner_interval_comparison.round(5)
+            .to_string(index=False)
+        )
+
+        print(
+            "Ordinary MLE converged:",
+            ordinary_fit.converged
+        )
+
+else:
+    print(
+        "Grouped bootstrap prepared. "
+        "Run after the group selects its winning model."
+    )
 ```
