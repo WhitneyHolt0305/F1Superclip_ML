@@ -2580,3 +2580,88 @@ else:
         "Run after the group selects its winning model."
     )
 ```
+
+# Milestone 20: Applying PCA to your predictors. Do you get principal components that make sense? Is this the right approach for your project?
+
+- We can fit PCA to our existing training predictors 
+
+```{python}
+from plotnine import aes, geom_line, geom_point, ggplot, labs
+from sklearn.decomposition import PCA
+
+# Reuse the encoding and scaling steps from the penalized models.
+preprocessing = make_f1_pipeline(LogisticRegression())[:-1]
+
+f1_pca = Pipeline([
+    *preprocessing.steps,
+    ("pca", PCA()),
+])
+
+f1_pca.fit(X_fit)
+
+pca_step = f1_pca.named_steps["pca"]
+feature_names = f1_pca.named_steps["encoding"].get_feature_names_out()
+
+print(f"Predictor columns after encoding: {len(feature_names)}")
+print(f"Principal components: {pca_step.n_components_}")
+```
+
+- The pipeline creates indicators such as driver and event, standardizes those indicators along with straight length and lap, and fits PCA. X_fit contains the four predictors. The outcome superclip is stored separately, and driver_session remains the grouping key for cross-validation.
+
+- Now I will create our scree plot and measure the reduction
+
+```{python}
+variance = pca_step.explained_variance_ratio_
+
+f1_scree = pd.DataFrame({
+    "component": np.arange(1, len(variance) + 1),
+    "variance_explained": variance,
+    "cumulative_variance": np.cumsum(variance),
+})
+
+print(f1_scree.head(10).round(3).to_string(index=False))
+
+(
+    ggplot(f1_scree, aes(x="component", y="variance_explained"))
+    + geom_line()
+    + geom_point()
+    + labs(
+        title="Scree Plot for F1 Superclipping Predictors",
+        x="Principal component",
+        y="Proportion of predictor variance explained",
+    )
+)
+k_80 = int(np.searchsorted(f1_scree["cumulative_variance"], 0.80) + 1)
+print(f"Components needed for 80% of predictor variance: {k_80}")
+```
+
+Results:
+- The scree plot shows no clear elbow. The first component explains about 3.5% of the predictor variance. The curve then declines gradually through most of the plot. The sharp drop near the end suggests the last two components explain very little variance. 
+
+- Now lets check whether our principal components make sense:
+    - This is sorted by absolute loading so a large negative value gets the same attention as a large positive one.
+```{python}
+f1_loadings = pd.DataFrame(
+    pca_step.components_.T,
+    index=feature_names,
+    columns=[f"PC{i}" for i in range(1, pca_step.n_components_ + 1)],
+).rename_axis("predictor")
+
+for component in f1_loadings.columns[:3]:
+    top_loadings = (
+        f1_loadings[[component]]
+        .assign(abs_loading=lambda table: table[component].abs())
+        .sort_values("abs_loading", ascending=False)
+        .head(6)
+    )
+    print(f"\n{component}")
+    print(top_loadings.round(3).to_string())
+```
+
+Overall findings:
+- I applied PCA to straight length, lap number, and the encoded driver and event predictors using the same preprocessing as our penalized models. The first component explained 3.5% of predictor variance, it took 10 components to reach 30.7% of predictor variance, and 31 components were needed to reach 80%. 
+- PC1 was primarily driven by straight_m with a loadings value of 0.529.
+- PC2 was driven by the Interlagos (0.528) event the driver CAM (0.397).
+- PC3 was driven by the Mexico city event and multiple drivers.
+- The gradual decline in explained variance suggests that PCA offers limited dimensionality reduction for our predictor matrix
+- In Milestone 21, we can test whether that reduction preserves predictive performance using the same grouped cross-validation as our logistic models.
