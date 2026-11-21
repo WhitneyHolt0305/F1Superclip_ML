@@ -2581,6 +2581,104 @@ else:
     )
 ```
 
+
+```{python}
+import numpy as np
+import pandas as pd
+import polars as pl
+
+from pyprojroot.here import here
+from sklearn.base import clone
+from sklearn.compose import ColumnTransformer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from threadpoolctl import threadpool_limits
+
+numeric_predictors = ["straight_m", "lap"]
+categorical_predictors = ["driver", "event"]
+predictors = numeric_predictors + categorical_predictors
+model_columns = ["superclip", *predictors, "session"]
+cutoff_prob = 0.45
+
+# Load and clean the same saved data used in the project.
+straights = (
+    pl.read_parquet(here("data/processed/straights_2026.parquet"))
+    .filter(pl.col("straight_m") <= 2000)
+    .select(model_columns)
+)
+cv_data = pd.DataFrame(straights.to_dict(as_series=False))
+
+for column in ["superclip", *numeric_predictors]:
+    cv_data[column] = pd.to_numeric(cv_data[column], errors="coerce")
+
+cv_data = (
+    cv_data.replace([np.inf, -np.inf], np.nan)
+    .dropna()
+    .reset_index(drop=True)
+)
+cv_data["superclip"] = cv_data["superclip"].astype(int)
+
+for column in categorical_predictors:
+    cv_data[column] = cv_data[column].astype(str)
+
+cv_data["driver_session"] = (
+    cv_data.groupby(["event", "session", "driver"], sort=False).ngroup()
+)
+
+# Reproduce the project's reserved test and validation splits.
+holdout = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
+train_idx, _ = next(holdout.split(
+    cv_data, cv_data["superclip"], groups=cv_data["driver_session"]
+))
+development_data = cv_data.iloc[train_idx].reset_index(drop=True)
+
+validation_splitter = StratifiedGroupKFold(
+    n_splits=5, shuffle=True, random_state=44
+)
+fit_idx, validation_idx = next(validation_splitter.split(
+    development_data,
+    development_data["superclip"],
+    groups=development_data["driver_session"],
+))
+
+fit_data = development_data.iloc[fit_idx]
+validation_data = development_data.iloc[validation_idx]
+X_fit = fit_data[predictors].copy()
+y_fit = fit_data["superclip"].to_numpy()
+X_validation = validation_data[predictors].copy()
+y_validation = validation_data["superclip"].to_numpy()
+
+def make_f1_pipeline(classifier):
+    encoder = ColumnTransformer(
+        [
+            ("numeric", "passthrough", numeric_predictors),
+            ("categorical", OneHotEncoder(
+                drop="first", handle_unknown="ignore", sparse_output=False
+            ), categorical_predictors),
+        ],
+        verbose_feature_names_out=False,
+    )
+    return Pipeline([
+        ("encoding", encoder),
+        ("feature_engineering", StandardScaler()),
+        ("classification", classifier),
+    ])
+
+def cutoff_accuracy(estimator, X_valid, y_valid):
+    probabilities = estimator.predict_proba(X_valid)[:, 1]
+    return accuracy_score(y_valid, probabilities >= cutoff_prob)
+
+# Supply the classifier settings that Milestone 21 clones.
+baseline_model = make_f1_pipeline(
+    LogisticRegression(C=np.inf, solver="lbfgs", max_iter=10000, tol=1e-6)
+)
+
+print(f"Fitting rows: {len(X_fit):,}")
+print(f"Validation rows: {len(X_validation):,}")
+```
 # Milestone 20: Applying PCA to your predictors. Do you get principal components that make sense? Is this the right approach for your project?
 
 - We can fit PCA to our existing training predictors 
@@ -2665,3 +2763,24 @@ Overall findings:
 - PC3 was driven by the Mexico city event and multiple drivers.
 - The gradual decline in explained variance suggests that PCA offers limited dimensionality reduction for our predictor matrix
 - In Milestone 21, we can test whether that reduction preserves predictive performance using the same grouped cross-validation as our logistic models.
+
+# Milestone 21: Principal Component Regression
+
+We used principal component scores as predictors in a logistic regression because detected superclipping is a binary outcome. We selected the number of components in Milestone 20 based on the 80% explained-variance threshold. We fit the encoder, scaler, PCA, and logistic regression on the fitting set, then evaluated the model on the held-out validation set.
+
+```{python}
+pcr_best = Pipeline([
+    *clone(f1_pca).steps,
+    ("classification", clone(baseline_model.named_steps["classification"])),
+])
+pcr_best.set_params(pca__n_components=k_80, pca__svd_solver="full")
+
+with threadpool_limits(limits=1):
+    pcr_best.fit(X_fit, y_fit)
+    pcr_validation_accuracy = cutoff_accuracy(pcr_best, X_validation, y_validation)
+
+print(f"Components used: {k_80} of {len(feature_names)}")
+print(f"PCR validation accuracy: {pcr_validation_accuracy:.2%}")
+```
+
+We fit a logistic regression model using the first 31 principal components, which explained approximately 80% of the predictor variance. At the 0.45 classification cutoff, the model achieved 74.57% accuracy on the held-out validation set. PCR reduced the input from 44 encoded predictor columns to 31 components, about a 30% reduction. This shows that we could reduce the number of inputs, although retaining 80% of the predictor variance still required most of the components.
